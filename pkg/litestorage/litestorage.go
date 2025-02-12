@@ -152,6 +152,7 @@ type Options struct {
 	executor        abi.Executor
 	// blockCh is used to receive new blocks in the blockchain, if set.
 	blockCh <-chan indexer.IDandBlock
+	MaxGoroutines int // number of concurrent goroutines for transaction processing
 }
 
 func WithPreloadAccounts(a []tongo.AccountID) Option {
@@ -209,10 +210,13 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 	if o.executor == nil {
 		o.executor = cli
 	}
+	if o.MaxGoroutines <= 0 {
+		o.MaxGoroutines = 100 // default value
+	}
 	storage := &LiteStorage{
 		logger: log,
 		// TODO: introduce an env variable to configure this number
-		maxGoroutines: 5,
+		maxGoroutines: o.MaxGoroutines,
 		client:        cli,
 		executor:      o.executor,
 		stopCh:        make(chan struct{}),
@@ -272,14 +276,34 @@ func (s *LiteStorage) Shutdown() {
 }
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
+	// Create a buffered worker pool to handle concurrent processing
+	workers := make(chan struct{}, s.maxGoroutines)
+	
 	for idAndBlock := range ch {
+		// Copy values to prevent race conditions in the goroutine
+		block := idAndBlock.Block
+		blockID := idAndBlock.ID
+		
+		// Get accounts snapshot to prevent map iteration race
+		s.mu.RLock()
+		accounts := make([]tongo.AccountID, 0, len(s.trackingAccounts))
 		for accountID := range s.trackingAccounts {
-			if err := s.processTransactions(accountID, idAndBlock.Block, idAndBlock.ID); err != nil {
-				s.logger.Error("failed to process transactions",
-					zap.String("account", accountID.String()),
-					zap.Error(err))
-				continue
-			}
+			accounts = append(accounts, accountID)
+		}
+		s.mu.RUnlock()
+
+		// Process each account concurrently but with controlled parallelism
+		for _, accountID := range accounts {
+			workers <- struct{}{} // Acquire worker slot
+			go func(accID tongo.AccountID) {
+				defer func() { <-workers }() // Release worker slot
+				
+				if err := s.processTransactions(accID, block, blockID); err != nil {
+					s.logger.Error("failed to process transactions",
+						zap.String("account", accID.String()),
+						zap.Error(err))
+				}
+			}(accountID)
 		}
 	}
 }
