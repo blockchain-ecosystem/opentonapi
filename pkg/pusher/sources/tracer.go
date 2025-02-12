@@ -33,6 +33,7 @@ type TraceSource interface {
 
 type storage interface {
 	GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error)
+	SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error)
 }
 
 type dispatcher interface {
@@ -118,6 +119,21 @@ func (t *Tracer) Run(ctx context.Context) error {
 
 					trace, err := t.storage.GetTrace(ctx, hash)
 					if err != nil {
+						if errors.Is(err, core.ErrEntityNotFound) {
+							// Try finding by message hash
+							txHash, err := t.storage.SearchTransactionByMessageHash(ctx, hash)
+							if err == nil {
+								trace, err = t.storage.GetTrace(ctx, *txHash)
+								if err == nil {
+									t.dispatch(trace)
+									return
+								}
+							}
+							// Log at debug level since this is expected
+							t.logger.Debug("trace not found",
+								zap.String("hash", hash.Hex()))
+							return
+						}
 						if !errors.Is(err, context.Canceled) {
 							t.logger.Error("failed to get trace",
 								zap.Error(err),
