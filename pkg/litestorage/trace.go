@@ -3,12 +3,15 @@ package litestorage
 import (
 	"context"
 	"fmt"
+	"time"
 
+	"github.com/avast/retry-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
+	"github.com/tonkeeper/tongo/tlb"
 
 	"github.com/tonkeeper/opentonapi/pkg/core"
 )
@@ -112,19 +115,37 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
-	blockIDExt, _, err := s.client.LookupBlock(ctx, blockID, 1, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	block, prs := s.blockCache.Load(blockIDExt)
-	if !prs {
+	var blockIDExt tongo.BlockIDExt
+	var block *tlb.Block
+	
+	err := retry.Do(func() error {
+		var err error
+		blockIDExt, _, err = s.client.LookupBlock(ctx, blockID, 1, nil, nil)
+		if err != nil {
+			return err
+		}
+		
+		if b, prs := s.blockCache.Load(blockIDExt); prs {
+			block = b
+			return nil
+		}
+		
 		b, err := s.client.GetBlock(ctx, blockIDExt)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		s.blockCache.Store(blockIDExt, &b)
 		block = &b
+		s.blockCache.Store(blockIDExt, block)
+		return nil
+	}, 
+	retry.Attempts(3),
+	retry.Delay(time.Second),
+	retry.DelayType(retry.BackOffDelay))
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
+
 	for _, tx := range block.AllTransactions() {
 		if tx.AccountAddr != a.Address {
 			continue

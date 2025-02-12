@@ -51,6 +51,11 @@ func extractInMsgCreatedLT(accountID tongo.AccountID, tx *tlb.Transaction) (inMs
 	return inMsgCreatedLT{}, false
 }
 
+type CacheOptions struct {
+	TTL time.Duration
+	MaxSize int
+}
+
 type LiteStorage struct {
 	logger                  *zap.Logger
 	client                  *liteapi.Client
@@ -196,19 +201,17 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	for block := range ch {
 		for _, tx := range block.Block.AllTransactions() {
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
-			if _, ok := s.trackingAccounts[accountID]; ok {
-				hash := tongo.Bits256(tx.Hash())
-				transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
-				if err != nil {
-					s.logger.Error("failed to process tx",
-						zap.String("tx-hash", hash.Hex()),
-						zap.Error(err))
-					continue
-				}
-				s.transactionsIndexByHash.Store(hash, transaction)
-				if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
-					s.transactionsByInMsgLT.Store(createLT, hash)
-				}
+			hash := tongo.Bits256(tx.Hash())
+			transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
+			if err != nil {
+				s.logger.Error("failed to process tx",
+					zap.String("tx-hash", hash.Hex()),
+					zap.Error(err))
+				continue
+			}
+			s.transactionsIndexByHash.Store(hash, transaction)
+			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+				s.transactionsByInMsgLT.Store(createLT, hash)
 			}
 		}
 	}

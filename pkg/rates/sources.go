@@ -96,7 +96,7 @@ func getMedianTonPrice(marketsPrice []Market) (float64, error) {
 // getBemoPrice retrieves the price of the Bemo jetton from the contract
 // TonApi is used because the standard liteserver executor cannot invoke methods on the account
 func (m *Mock) getBemoPrice(tonPrice float64, pools map[ton.AccountID]float64) (map[ton.AccountID]float64, error) {
-	url := fmt.Sprintf("https://tonapi.io/v2/blockchain/accounts/%v/methods/get_full_data", references.BemoAccount.ToRaw())
+	url := fmt.Sprintf("https://bridge-ton.hii.network/v2/blockchain/accounts/%v/methods/get_full_data", references.BemoAccount.ToRaw())
 	respBody, err := sendRequest(url, m.TonApiToken)
 	if err != nil {
 		return map[ton.AccountID]float64{}, err
@@ -134,7 +134,7 @@ func (m *Mock) getBemoPrice(tonPrice float64, pools map[ton.AccountID]float64) (
 // getTonstakersPrice retrieves the price and token address of an account in the Tonstakers pool
 // TonApi is used because the standard liteserver executor cannot invoke methods on the account
 func (m *Mock) getTonstakersPrice(tonPrice float64, pools map[ton.AccountID]float64) (map[ton.AccountID]float64, error) {
-	url := fmt.Sprintf("https://tonapi.io/v2/blockchain/accounts/%v/methods/get_pool_full_data", references.TonstakersAccountPool.ToRaw())
+	url := fmt.Sprintf("https://bridge-ton.hii.network/v2/blockchain/accounts/%v/methods/get_pool_full_data", references.TonstakersAccountPool.ToRaw())
 	respBody, err := sendRequest(url, m.TonApiToken)
 	if err != nil {
 		return map[ton.AccountID]float64{}, err
@@ -179,7 +179,7 @@ func (m *Mock) getSlpTokensPrice(tonPrice float64, pools map[ton.AccountID]float
 	}
 	accountsPrice := make(map[tongo.AccountID]float64)
 	for slpType, account := range references.SlpAccounts {
-		url := fmt.Sprintf("https://tonapi.io/v2/blockchain/accounts/%v/methods/get_vault_data", account.ToRaw())
+		url := fmt.Sprintf("https://bridge-ton.hii.network/v2/blockchain/accounts/%v/methods/get_vault_data", account.ToRaw())
 		respBody, err := sendRequest(url, m.TonApiToken)
 		if err != nil {
 			continue
