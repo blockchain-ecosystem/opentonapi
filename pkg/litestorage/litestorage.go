@@ -75,6 +75,7 @@ type CacheOptions struct {
 
 type BadgerStorage struct {
 	db *badger.DB
+	mu sync.RWMutex  // Add mutex for synchronization
 	// Hot cache for frequently accessed data
 	transactionCache cache.Cache[tongo.Bits256, *core.Transaction]
 	blockCache       cache.Cache[tongo.BlockIDExt, *tlb.Block]
@@ -271,47 +272,55 @@ func (s *LiteStorage) Shutdown() {
 }
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
-	if ch == nil {
-		return
-	}
-	for block := range ch {
-		for _, tx := range block.Block.AllTransactions() {
-			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
-			hash := tongo.Bits256(tx.Hash())
-			transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
-			if err != nil {
-				s.logger.Error("failed to process tx",
-					zap.String("tx-hash", hash.Hex()),
+	for idAndBlock := range ch {
+		for accountID := range s.trackingAccounts {
+			if err := s.processTransactions(accountID, idAndBlock.Block, idAndBlock.ID); err != nil {
+				s.logger.Error("failed to process transactions",
+					zap.String("account", accountID.String()),
 					zap.Error(err))
 				continue
-			}
-			
-			// Store in memory cache
-			s.transactionsIndexByHash.Store(hash, transaction)
-			
-			// Store in BadgerDB
-			txData, err := json.Marshal(transaction)
-			if err != nil {
-				s.logger.Error("failed to marshal transaction",
-					zap.String("tx-hash", hash.Hex()),
-					zap.Error(err))
-				continue
-			}
-			
-			err = s.persistent.db.Update(func(txn *badger.Txn) error {
-				return txn.Set([]byte(prefixTx+hash.Hex()), txData)
-			})
-			if err != nil {
-				s.logger.Error("failed to store transaction in BadgerDB",
-					zap.String("tx-hash", hash.Hex()),
-					zap.Error(err))
-			}
-			
-			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
-				s.transactionsByInMsgLT.Store(createLT, hash)
 			}
 		}
 	}
+}
+
+func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockIDExt tongo.BlockIDExt) error {
+	txs := make([]*core.Transaction, 0, len(block.AllTransactions()))
+	txHashes := make(map[tongo.Bits256]*core.Transaction)
+
+	for _, tx := range block.AllTransactions() {
+		hash := tongo.Bits256(tx.Hash())
+		transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
+			Transaction: *tx, 
+			BlockID: blockIDExt,
+		}, nil)
+		if err != nil {
+			s.logger.Error("failed to process tx",
+				zap.String("tx-hash", hash.Hex()),
+				zap.Error(err))
+			continue
+		}
+		
+		txs = append(txs, transaction)
+		txHashes[hash] = transaction
+		
+		if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+			s.transactionsByInMsgLT.Store(createLT, hash)
+		}
+	}
+
+	// Batch store in BadgerDB
+	if err := s.persistent.BatchSetTransactions(txs); err != nil {
+		s.logger.Error("failed to batch store transactions", zap.Error(err))
+		return err
+	}
+
+	// Update memory cache after successful batch store
+	for hash, tx := range txHashes {
+		s.transactionsIndexByHash.Store(hash, tx)
+	}
+
+	return nil
 }
 
 func (s *LiteStorage) GetContract(ctx context.Context, id tongo.AccountID) (*core.Contract, error) {
@@ -691,6 +700,9 @@ func (s *LiteStorage) GetMultisigByID(ctx context.Context, accountID ton.Account
 }
 
 func (b *BadgerStorage) SetTransaction(tx *core.Transaction) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
 	data, err := json.Marshal(tx)
 	if err != nil {
 		return err
@@ -698,7 +710,30 @@ func (b *BadgerStorage) SetTransaction(tx *core.Transaction) error {
 	
 	return b.db.Update(func(txn *badger.Txn) error {
 		entry := badger.NewEntry([]byte(prefixTx + tx.Hash.Hex()), data).
-			WithTTL(BadgerTTL)  // Data will be eligible for GC after TTL
+			WithTTL(BadgerTTL)
 		return txn.SetEntry(entry)
 	})
+}
+
+func (b *BadgerStorage) BatchSetTransactions(txs []*core.Transaction) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	
+	batch := b.db.NewWriteBatch()
+	defer batch.Cancel()
+	
+	for _, tx := range txs {
+		data, err := json.Marshal(tx)
+		if err != nil {
+			return err
+		}
+		
+		err = batch.SetEntry(badger.NewEntry([]byte(prefixTx + tx.Hash.Hex()), data).
+			WithTTL(BadgerTTL))
+		if err != nil {
+			return err
+		}
+	}
+	
+	return batch.Flush()
 }
