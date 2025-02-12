@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
+	"github.com/avast/retry-go"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
@@ -113,6 +115,7 @@ func (b *BlockchainSource) Run(ctx context.Context) chan indexer.IDandBlock {
 			case <-ctx.Done():
 				return
 			case block := <-newBlockCh:
+				// Send block event first
 				blockCh <- BlockEvent{
 					Workchain: block.ID.Workchain,
 					Shard:     fmt.Sprintf("%x", block.ID.Shard),
@@ -120,20 +123,38 @@ func (b *BlockchainSource) Run(ctx context.Context) chan indexer.IDandBlock {
 					RootHash:  block.ID.RootHash.Hex(),
 					FileHash:  block.ID.FileHash.Hex(),
 				}
+
+				// Process transactions with retry
 				transactions := block.Block.AllTransactions()
 				for _, tx := range transactions {
 					var msgOpCode *uint32
 					var msgOpName *abi.MsgOpName
-					if tx.Msgs.InMsg.Exists {
-						cell := boc.Cell(tx.Msgs.InMsg.Value.Value.Body.Value)
-						msgOpCode, msgOpName = msgOpCodeAndName(tx.Msgs.InMsg.Value.Value, &cell)
-					}
-					ch <- TransactionEvent{
-						AccountID: *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr),
-						Lt:        tx.Lt,
-						TxHash:    tx.Hash().Hex(),
-						MsgOpName: msgOpName,
-						MsgOpCode: msgOpCode,
+
+					// Retry logic for transaction processing
+					err := retry.Do(
+						func() error {
+							if tx.Msgs.InMsg.Exists {
+								cell := boc.Cell(tx.Msgs.InMsg.Value.Value.Body.Value)
+								msgOpCode, msgOpName = msgOpCodeAndName(tx.Msgs.InMsg.Value.Value, &cell)
+							}
+							ch <- TransactionEvent{
+								AccountID: *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr),
+								Lt:        tx.Lt,
+								TxHash:    tx.Hash().Hex(),
+								MsgOpName: msgOpName,
+								MsgOpCode: msgOpCode,
+							}
+							return nil
+						},
+						retry.Attempts(3),
+						retry.Delay(100*time.Millisecond),
+						retry.DelayType(retry.BackOffDelay),
+					)
+
+					if err != nil {
+						b.logger.Error("failed to process transaction",
+							zap.Error(err),
+							zap.String("tx_hash", tx.Hash().Hex()))
 					}
 				}
 			}

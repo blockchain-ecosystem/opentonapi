@@ -314,32 +314,54 @@ func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.
 
 	for _, tx := range block.AllTransactions() {
 		hash := tongo.Bits256(tx.Hash())
-		transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
-			Transaction: *tx, 
-			BlockID: blockIDExt,
-		}, nil)
+		
+		// Add retry logic for transaction conversion
+		var transaction *core.Transaction
+		err := retry.Do(
+			func() error {
+				var err error
+				transaction, err = core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
+					Transaction: *tx,
+					BlockID:    blockIDExt,
+				}, nil)
+				return err
+			},
+			retry.Attempts(3),
+			retry.Delay(100*time.Millisecond),
+			retry.DelayType(retry.BackOffDelay),
+		)
+
 		if err != nil {
 			s.logger.Error("failed to process tx",
 				zap.String("tx-hash", hash.Hex()),
 				zap.Error(err))
 			continue
 		}
-		
+
 		txs = append(txs, transaction)
 		txHashes[hash] = transaction
-		
+
 		if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
 			s.transactionsByInMsgLT.Store(createLT, hash)
 		}
 	}
 
-	// Batch store in BadgerDB
-	if err := s.persistent.BatchSetTransactions(txs); err != nil {
+	// Batch store with retry
+	err := retry.Do(
+		func() error {
+			return s.persistent.BatchSetTransactions(txs)
+		},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+		retry.DelayType(retry.BackOffDelay),
+	)
+
+	if err != nil {
 		s.logger.Error("failed to batch store transactions", zap.Error(err))
 		return err
 	}
 
-	// Update memory cache after successful batch store
+	// Update memory cache
 	for hash, tx := range txHashes {
 		s.transactionsIndexByHash.Store(hash, tx)
 	}
