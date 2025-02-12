@@ -1,4 +1,3 @@
-
 # Description
 
 Opentonapi simplifies development of TON-based applications and 
@@ -37,3 +36,13 @@ ACCOUNTS="comma-separated-list-of-raw-account-addresses" make run
 ## Docker
 
 docker run -d -p8081:8081 tonkeeper/opentonapi 
+
+## Rate Service Configuration
+
+The following environment variables can be used to configure the rate service:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| TONAPI_URL | https://tonapi.io | Base URL for TonAPI service |
+| BRIDGE_TON_URL | https://bridge-ton.hii.network | Base URL for Bridge-Ton service |
+| RATES_REQUEST_TIMEOUT | 10s | Timeout for rate service requests | 

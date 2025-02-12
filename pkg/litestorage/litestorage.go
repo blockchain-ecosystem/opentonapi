@@ -3,8 +3,10 @@ package litestorage
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"sync"
@@ -24,9 +26,24 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/core"
+)
+
+const (
+	prefixTx    = "tx:"
+	prefixBlock = "block:"
+	prefixMeta  = "meta:"
+	// Cache TTL constants
+	TransactionCacheTTL = time.Minute * 5
+	BlockCacheTTL      = time.Minute * 10
+	MetadataCacheTTL   = time.Hour    // For less frequently changing data
+	ConfigCacheTTL     = time.Second * 2
+	// BadgerDB cleanup settings
+	BadgerGCInterval = 6 * time.Hour
+	BadgerTTL       = 48 * 24 * time.Hour  // 48 days retention
 )
 
 var storageTimeHistogramVec = promauto.NewHistogramVec(
@@ -52,14 +69,54 @@ func extractInMsgCreatedLT(accountID tongo.AccountID, tx *tlb.Transaction) (inMs
 }
 
 type CacheOptions struct {
-	TTL time.Duration
+	TTL     time.Duration
 	MaxSize int
 }
 
+type BadgerStorage struct {
+	db *badger.DB
+	// Hot cache for frequently accessed data
+	transactionCache cache.Cache[tongo.Bits256, *core.Transaction]
+	blockCache       cache.Cache[tongo.BlockIDExt, *tlb.Block]
+	stopGC          chan struct{} // Channel to stop GC goroutine
+}
+
+// StartGC starts the garbage collection process
+func (b *BadgerStorage) StartGC() {
+	go func() {
+		ticker := time.NewTicker(BadgerGCInterval)
+		defer ticker.Stop()
+		
+		for {
+			select {
+			case <-ticker.C:
+				// Run value log GC
+				err := b.db.RunValueLogGC(0.5) // Run when we can release 50% of space
+				if err != nil && err != badger.ErrNoRewrite {
+					// Log error but continue
+					log.Printf("Badger GC error: %v", err)
+				}
+			case <-b.stopGC:
+				return
+			}
+		}
+	}()
+}
+
+// StopGC stops the garbage collection process
+func (b *BadgerStorage) StopGC() {
+	if b.stopGC != nil {
+		close(b.stopGC)
+	}
+}
+
 type LiteStorage struct {
-	logger                  *zap.Logger
-	client                  *liteapi.Client
-	executor                abi.Executor
+	logger     *zap.Logger
+	client     *liteapi.Client
+	executor   abi.Executor
+	persistent *BadgerStorage
+	
+	// Hot caches
 	jettonMetaCache         *xsync.MapOf[string, tep64.Metadata]
 	transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
 	transactionsByInMsgLT   *xsync.MapOf[inMsgCreatedLT, tongo.Bits256]
@@ -67,15 +124,16 @@ type LiteStorage struct {
 	accountInterfacesCache  *xsync.MapOf[tongo.AccountID, []abi.ContractInterface]
 	// tvmLibraryCache contains public tvm libraries.
 	// As a library is immutable, it's ok to cache it.
-	tvmLibraryCache cache.Cache[string, boc.Cell]
-	knownAccounts   map[string][]tongo.AccountID
+	tvmLibraryCache        cache.Cache[string, boc.Cell]
+	configCache            cache.Cache[int, ton.BlockchainConfig]
+	
+	knownAccounts      map[string][]tongo.AccountID
 	// maxGoroutines specifies a number of goroutines used to perform some time-consuming operations.
-	maxGoroutines int
-	// trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
-	trackingAccounts  map[tongo.AccountID]struct{}
-	pubKeyByAccountID *xsync.MapOf[tongo.AccountID, ed25519.PublicKey]
-	configCache       cache.Cache[int, ton.BlockchainConfig]
-
+	maxGoroutines      int
+	 // trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
+	trackingAccounts   map[tongo.AccountID]struct{}
+	pubKeyByAccountID  *xsync.MapOf[tongo.AccountID, ed25519.PublicKey]
+	
 	stopCh chan struct{}
 	// mu protects trimmedConfigBase64.
 	mu sync.RWMutex
@@ -129,6 +187,20 @@ func WithBlockChannel(ch <-chan indexer.IDandBlock) Option {
 type Option func(o *Options)
 
 func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*LiteStorage, error) {
+	// Initialize BadgerDB
+	badgerOpts := badger.DefaultOptions("./data/badger")
+	badgerOpts.ValueLogFileSize = 1 << 30 // 1GB
+	db, err := badger.Open(badgerOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open badger: %w", err)
+	}
+	
+	persistent := &BadgerStorage{
+		db:               db,
+		transactionCache: cache.NewLRUCache[tongo.Bits256, *core.Transaction](10000, "transactions"),
+		blockCache:       cache.NewLRUCache[tongo.BlockIDExt, *tlb.Block](1000, "blocks"),
+	}
+	
 	o := &Options{}
 	for i := range opts {
 		opts[i](o)
@@ -156,6 +228,7 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 		pubKeyByAccountID:       xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
 		tvmLibraryCache:         cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:             cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
+		persistent:              persistent,
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons
@@ -192,6 +265,9 @@ func (s *LiteStorage) SetExecutor(e abi.Executor) {
 // Shutdown stops all background goroutines.
 func (s *LiteStorage) Shutdown() {
 	s.stopCh <- struct{}{}
+	if err := s.persistent.db.Close(); err != nil {
+		s.logger.Error("failed to close BadgerDB", zap.Error(err))
+	}
 }
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
@@ -209,7 +285,28 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 					zap.Error(err))
 				continue
 			}
+			
+			// Store in memory cache
 			s.transactionsIndexByHash.Store(hash, transaction)
+			
+			// Store in BadgerDB
+			txData, err := json.Marshal(transaction)
+			if err != nil {
+				s.logger.Error("failed to marshal transaction",
+					zap.String("tx-hash", hash.Hex()),
+					zap.Error(err))
+				continue
+			}
+			
+			err = s.persistent.db.Update(func(txn *badger.Txn) error {
+				return txn.Set([]byte(prefixTx+hash.Hex()), txData)
+			})
+			if err != nil {
+				s.logger.Error("failed to store transaction in BadgerDB",
+					zap.String("tx-hash", hash.Hex()),
+					zap.Error(err))
+			}
+			
 			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
 				s.transactionsByInMsgLT.Store(createLT, hash)
 			}
@@ -406,11 +503,34 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		storageTimeHistogramVec.WithLabelValues("get_transaction").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	tx, prs := s.transactionsIndexByHash.Load(hash)
-	if prs {
+	
+	// Check memory cache first
+	if tx, prs := s.transactionsIndexByHash.Load(hash); prs {
 		return tx, nil
 	}
-	return nil, fmt.Errorf("not found tx %x", hash)
+	
+	// Check persistent storage
+	var tx core.Transaction
+	err := s.persistent.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte(prefixTx + hash.Hex()))
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &tx)
+		})
+	})
+	
+	if err == badger.ErrKeyNotFound {
+		return nil, fmt.Errorf("not found tx %x", hash)
+	}
+	if err != nil {
+		return nil, err
+	}
+	
+	// Update memory cache
+	s.transactionsIndexByHash.Store(hash, &tx)
+	return &tx, nil
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
@@ -568,4 +688,17 @@ func (s *LiteStorage) GetAccountMultisigs(ctx context.Context, accountID ton.Acc
 
 func (s *LiteStorage) GetMultisigByID(ctx context.Context, accountID ton.AccountID) (*core.Multisig, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+
+func (b *BadgerStorage) SetTransaction(tx *core.Transaction) error {
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return err
+	}
+	
+	return b.db.Update(func(txn *badger.Txn) error {
+		entry := badger.NewEntry([]byte(prefixTx + tx.Hash.Hex()), data).
+			WithTTL(BadgerTTL)  // Data will be eligible for GC after TTL
+		return txn.SetEntry(entry)
+	})
 }
