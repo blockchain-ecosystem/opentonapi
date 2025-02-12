@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/tonkeeper/opentonapi/pkg/cache"
+	"github.com/tonkeeper/opentonapi/pkg/cache" 
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"go.uber.org/zap"
@@ -117,45 +119,14 @@ func (t *Tracer) Run(ctx context.Context) error {
 						return
 					}
 
-					trace, err := t.storage.GetTrace(ctx, hash)
+					trace, err := t.processTransaction(ctx, hash)
 					if err != nil {
-						if errors.Is(err, core.ErrEntityNotFound) {
-							// Try finding by message hash
-							txHash, err := t.storage.SearchTransactionByMessageHash(ctx, hash)
-							if err != nil {
-								// Skip logging for not found cases
-								if !errors.Is(err, core.ErrEntityNotFound) && !errors.Is(err, context.Canceled) {
-									t.logger.Debug("search transaction failed",
-										zap.Error(err),
-										zap.String("hash", hash.Hex()))
-								}
-								return
-							}
-							
-							// Double check txHash is not nil
-							if txHash == nil {
-								return
-							}
-
-							trace, err = t.storage.GetTrace(ctx, *txHash)
-							if err != nil {
-								// Skip logging for not found cases
-								if !errors.Is(err, core.ErrEntityNotFound) && !errors.Is(err, context.Canceled) {
-									t.logger.Debug("get trace by tx hash failed",
-										zap.Error(err),
-										zap.String("hash", txHash.Hex()))
-								}
-								return
-							}
-						} else if !errors.Is(err, context.Canceled) {
-							// Only log real errors at error level
+						if !errors.Is(err, context.Canceled) {
 							t.logger.Error("failed to get trace",
 								zap.Error(err),
 								zap.String("hash", hash.Hex()))
-							return
-						} else {
-							return
 						}
+						return
 					}
 
 					// Ensure we have a valid trace before dispatching
@@ -168,6 +139,38 @@ func (t *Tracer) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (t *Tracer) processTransaction(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+	var trace *core.Trace
+	err := backoff.Retry(func() error {
+		var err error
+		trace, err = t.storage.GetTrace(ctx, hash)
+		if err != nil {
+			if errors.Is(err, core.ErrEntityNotFound) {
+				// Try finding by message hash
+				txHash, err := t.storage.SearchTransactionByMessageHash(ctx, hash)
+				if err != nil {
+					return err
+				}
+				if txHash == nil {
+					return fmt.Errorf("transaction not found")
+				}
+				trace, err = t.storage.GetTrace(ctx, *txHash)
+				if err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
+		}
+		return nil
+	}, backoff.WithMaxRetries(backoff.NewConstantBackOff(1*time.Second), 5))
+
+	if err != nil {
+		return nil, err
+	}
+	return trace, nil
 }
 
 // putTraceInCache returns true if the trace was not in the cache before.

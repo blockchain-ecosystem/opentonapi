@@ -31,16 +31,37 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	tx, err := s.GetTransaction(ctx, hash)
+
+	var trace *core.Trace
+	err := retry.Do(
+		func() error {
+			tx, err := s.GetTransaction(ctx, hash)
+			if err != nil {
+				return err
+			}
+			
+			root, err := s.findRoot(ctx, tx, 0)
+			if err != nil {
+				return err
+			}
+			
+			t, err := s.recursiveGetChildren(ctx, *root, 0)
+			if err != nil {
+				return err
+			}
+			trace = &t
+			return nil
+		},
+		retry.Attempts(3),
+		retry.Delay(500*time.Millisecond),
+		retry.DelayType(retry.BackOffDelay),
+	)
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get trace: %w", err)
 	}
-	root, err := s.findRoot(ctx, tx, 0)
-	if err != nil {
-		return nil, err
-	}
-	trace, err := s.recursiveGetChildren(ctx, *root, 0)
-	return &trace, err
+	
+	return trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
