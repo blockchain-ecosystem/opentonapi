@@ -122,27 +122,46 @@ func (t *Tracer) Run(ctx context.Context) error {
 						if errors.Is(err, core.ErrEntityNotFound) {
 							// Try finding by message hash
 							txHash, err := t.storage.SearchTransactionByMessageHash(ctx, hash)
-							if err == nil {
-								trace, err = t.storage.GetTrace(ctx, *txHash)
-								if err == nil {
-									t.dispatch(trace)
-									return
+							if err != nil {
+								// Skip logging for not found cases
+								if !errors.Is(err, core.ErrEntityNotFound) && !errors.Is(err, context.Canceled) {
+									t.logger.Debug("search transaction failed",
+										zap.Error(err),
+										zap.String("hash", hash.Hex()))
 								}
+								return
 							}
-							// Log at debug level since this is expected
-							t.logger.Debug("trace not found",
-								zap.String("hash", hash.Hex()))
-							return
-						}
-						if !errors.Is(err, context.Canceled) {
+							
+							// Double check txHash is not nil
+							if txHash == nil {
+								return
+							}
+
+							trace, err = t.storage.GetTrace(ctx, *txHash)
+							if err != nil {
+								// Skip logging for not found cases
+								if !errors.Is(err, core.ErrEntityNotFound) && !errors.Is(err, context.Canceled) {
+									t.logger.Debug("get trace by tx hash failed",
+										zap.Error(err),
+										zap.String("hash", txHash.Hex()))
+								}
+								return
+							}
+						} else if !errors.Is(err, context.Canceled) {
+							// Only log real errors at error level
 							t.logger.Error("failed to get trace",
 								zap.Error(err),
 								zap.String("hash", hash.Hex()))
+							return
+						} else {
+							return
 						}
-						return
 					}
 
-					t.dispatch(trace)
+					// Ensure we have a valid trace before dispatching
+					if trace != nil {
+						t.dispatch(trace)
+					}
 				}(txEvent)
 			case <-ctx.Done():
 				return ctx.Err()
