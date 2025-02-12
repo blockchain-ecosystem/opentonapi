@@ -3,10 +3,10 @@ package sources
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
-	"github.com/Narasimha1997/ratelimiter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tonkeeper/opentonapi/pkg/cache"
@@ -46,14 +46,10 @@ type Tracer struct {
 	dispatcher dispatcher
 	source     TransactionSource
 
-	// mu protects traceCache.
-	// Tracer usually receives multiple tx hashes that are parts of the same trace,
-	// and we want to avoid sending the same trace to subscribers multiple times.
-	// We use a cache to keep track of already sent traces.
-	// "cache.Cache" doesn't provide a single atomic operation to check and set a value if it hasn't been set yet,
-	// so we use a mutex to serialize access to the cache.
 	mu         sync.Mutex
 	traceCache cache.Cache[string, struct{}]
+	workerPool chan struct{}
+	maxWorkers int
 }
 
 func NewTracer(logger *zap.Logger, storage storage, source TransactionSource) *Tracer {
@@ -63,6 +59,8 @@ func NewTracer(logger *zap.Logger, storage storage, source TransactionSource) *T
 		source:     source,
 		dispatcher: NewTraceDispatcher(logger),
 		traceCache: cache.NewLRUCache[string, struct{}](10000, "tracer_trace_cache"),
+		maxWorkers: 100,
+		workerPool: make(chan struct{}, 100),
 	}
 }
 
@@ -76,7 +74,7 @@ func (t *Tracer) SubscribeToTraces(ctx context.Context, deliveryFn DeliveryFn, o
 	return t.dispatcher.RegisterSubscriber(deliveryFn, opts)
 }
 
-func (t *Tracer) Run(ctx context.Context) {
+func (t *Tracer) Run(ctx context.Context) error {
 	txCh := make(chan TransactionEventData, 1000)
 	cancelFn := t.source.SubscribeToTransactions(ctx, func(eventData []byte) {
 		var tx TransactionEventData
@@ -84,40 +82,56 @@ func (t *Tracer) Run(ctx context.Context) {
 			t.logger.Error("json.Unmarshal() failed", zap.Error(err))
 			return
 		}
-		txCh <- tx
+		select {
+		case txCh <- tx:
+		case <-ctx.Done():
+			return
+		}
 	}, SubscribeToTransactionsOptions{AllAccounts: true, AllOperations: true})
 
 	defer cancelFn()
 
-	limiter := ratelimiter.NewDefaultLimiter(300, 10*time.Second)
-	defer limiter.Kill()
+	// Initialize worker pool
+	for i := 0; i < t.maxWorkers; i++ {
+		t.workerPool <- struct{}{}
+	}
 
-	for txEvent := range txCh {
-		if ctx.Err() != nil {
-			return
-		}
-		if allow, _ := limiter.ShouldAllow(1); !allow {
-			traceNumber.With(map[string]string{"type": "dropped"}).Inc()
-			continue
-		}
-		go func(txEvent TransactionEventData) {
-			var hash tongo.Bits256
-			if err := hash.FromHex(txEvent.TxHash); err != nil {
-				// this should never happen
-				t.logger.Error("hash.FromHex() failed", zap.Error(err))
-				return
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case txEvent := <-txCh:
+			select {
+			case worker := <-t.workerPool:
+				go func(tx TransactionEventData) {
+					defer func() { t.workerPool <- worker }()
+					
+					var hash tongo.Bits256
+					if err := hash.FromHex(tx.TxHash); err != nil {
+						t.logger.Error("hash.FromHex() failed", zap.Error(err))
+						return
+					}
+
+					if !t.shouldProcess(hash) {
+						return
+					}
+
+					trace, err := t.storage.GetTrace(ctx, hash)
+					if err != nil {
+						if !errors.Is(err, context.Canceled) {
+							t.logger.Error("failed to get trace",
+								zap.Error(err),
+								zap.String("hash", hash.Hex()))
+						}
+						return
+					}
+
+					t.dispatch(trace)
+				}(txEvent)
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-			for i := 0; i < 15; i++ {
-				trace, err := t.storage.GetTrace(ctx, hash)
-				if err != nil {
-					time.Sleep(1 * time.Second)
-					continue
-				}
-				t.dispatch(trace)
-				return
-			}
-			traceNumber.With(map[string]string{"type": "failed-to-load"}).Inc()
-		}(txEvent)
+		}
 	}
 }
 
@@ -160,4 +174,9 @@ func (t *Tracer) dispatch(trace *core.Trace) {
 	}
 
 	t.dispatcher.Dispatch(accounts, eventJSON)
+}
+
+// shouldProcess checks if we should process this trace
+func (t *Tracer) shouldProcess(hash tongo.Bits256) bool {
+	return t.putTraceInCache(hash.Hex())
 }
