@@ -345,37 +345,40 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 }
 
 func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockIDExt tongo.BlockIDExt) error {
-	txs := make([]*core.Transaction, 0, len(block.AllTransactions()))
-	txHashes := make(map[tongo.Bits256]*core.Transaction)
+	s.logger.Debug("processing transactions", 
+		zap.String("account", accountID.String()),
+		zap.Int("tx_count", len(block.AllTransactions())))
 
+	txs := make([]*core.Transaction, 0, len(block.AllTransactions()))
+	
 	for _, tx := range block.AllTransactions() {
 		hash := tongo.Bits256(tx.Hash())
 		
-		// Add retry logic for transaction conversion
-		var transaction *core.Transaction
-		err := retry.Do(
-			func() error {
-				var err error
-				transaction, err = core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
-					Transaction: *tx,
-					BlockID:    blockIDExt,
-				}, nil)
-				return err
-			},
-			retry.Attempts(3),
-			retry.Delay(100*time.Millisecond),
-			retry.DelayType(retry.BackOffDelay),
-		)
-
+		transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
+			Transaction: *tx,
+			BlockID:    blockIDExt,
+		}, nil)
+		
 		if err != nil {
-			s.logger.Error("failed to process tx",
-				zap.String("tx-hash", hash.Hex()),
+			s.logger.Error("failed to convert tx",
+				zap.String("tx_hash", hash.Hex()),
 				zap.Error(err))
 			continue
 		}
 
+		// Store individual transaction immediately
+		err = s.SaveTransaction(transaction)
+		if err != nil {
+			s.logger.Error("failed to save transaction",
+				zap.String("tx_hash", hash.Hex()),
+				zap.Error(err))
+			continue
+		}
+
+		s.logger.Debug("transaction processed and saved",
+			zap.String("tx_hash", hash.Hex()))
+
 		txs = append(txs, transaction)
-		txHashes[hash] = transaction
 
 		if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
 			s.transactionsByInMsgLT.Store(createLT, hash)
@@ -398,8 +401,8 @@ func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.
 	}
 
 	// Update memory cache
-	for hash, tx := range txHashes {
-		s.transactionsIndexByHash.Store(hash, tx)
+	for _, tx := range txs {
+		s.transactionsIndexByHash.Store(tx.Hash, tx)
 	}
 
 	return nil
