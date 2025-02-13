@@ -89,6 +89,7 @@ type LiteStorage struct {
 	db                  *badger.DB
 	connPool            sync.Pool
 	maxConns            int
+	timeout             time.Duration
 }
 
 type Options struct {
@@ -152,21 +153,13 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		return nil, fmt.Errorf("failed to open badger: %w", err)
 	}
 
-	storage := &LiteStorage{
-		logger: logger,
-		// TODO: introduce an env variable to configure this number
-		maxGoroutines: 5,
-		client:        cli,
-		executor:      o.executor,
-		stopCh:        make(chan struct{}),
-		// read-only data
-		knownAccounts: make(map[string][]tongo.AccountID),
-		// trackingAccounts: map[tongo.AccountID]struct{}{},
-		// data for concurrent access
-		// TODO: implement expiration logic for the caches below.
-		jettonMetaCache: xsync.NewMapOf[tep64.Metadata](),
-		// transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
-		// transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
+	s := &LiteStorage{
+		logger:                 logger,
+		client:                 cli,
+		executor:               o.executor,
+		stopCh:                 make(chan struct{}),
+		knownAccounts:          make(map[string][]tongo.AccountID),
+		jettonMetaCache:        xsync.NewMapOf[tep64.Metadata](),
 		blockCache:             xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
 		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
 		pubKeyByAccountID:      xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
@@ -174,38 +167,35 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		configCache:            cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
 		db:                     db,
 		maxConns:               10,
+		timeout:                30 * time.Second,
 		connPool: sync.Pool{
 			New: func() interface{} {
-				return cli
+				return cli // Just return the original client
 			},
 		},
 	}
-	storage.knownAccounts["tf_pools"] = o.tfPools
-	storage.knownAccounts["jettons"] = o.jettons
+	s.knownAccounts["tf_pools"] = o.tfPools
+	s.knownAccounts["jettons"] = o.jettons
 
-	// for _, a := range o.preloadAccounts {
-	// 	storage.trackingAccounts[a] = struct{}{}
-	// }
-
-	blockIterator := iter.Iterator[tongo.BlockID]{MaxGoroutines: storage.maxGoroutines}
+	blockIterator := iter.Iterator[tongo.BlockID]{MaxGoroutines: s.maxGoroutines}
 	blockIterator.ForEach(o.preloadBlocks, func(id *tongo.BlockID) {
-		if err := storage.preloadBlock(*id); err != nil {
+		if err := s.preloadBlock(*id); err != nil {
 			log.Error("failed to preload block",
 				zap.String("blockID", id.String()),
 				zap.Error(err))
 		}
 	})
-	iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: storage.maxGoroutines}
+	iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: s.maxGoroutines}
 	iterator.ForEach(o.preloadAccounts, func(accountID *tongo.AccountID) {
-		if err := storage.preloadAccount(*accountID); err != nil {
+		if err := s.preloadAccount(*accountID); err != nil {
 			log.Error("failed to preload account",
 				zap.String("accountID", accountID.String()),
 				zap.Error(err))
 		}
 	})
-	go storage.run(o.blockCh)
-	go storage.runBlockchainConfigUpdate(5 * time.Second)
-	return storage, nil
+	go s.run(o.blockCh)
+	go s.runBlockchainConfigUpdate(5 * time.Second)
+	return s, nil
 }
 
 func (s *LiteStorage) SetExecutor(e abi.Executor) {
@@ -662,9 +652,9 @@ func (s *LiteStorage) GetMultisigByID(ctx context.Context, accountID ton.Account
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (s *LiteStorage) getConnection() (*liteapi.Client, func()) {
-	conn := s.connPool.Get().(*liteapi.Client)
-	return conn, func() {
-		s.connPool.Put(conn)
+func (s *LiteStorage) getClient() (*liteapi.Client, func()) {
+	client := s.connPool.Get().(*liteapi.Client)
+	return client, func() {
+		s.connPool.Put(client)
 	}
 }

@@ -96,8 +96,10 @@ func (idx *Indexer) processBlocks(ctx context.Context, chunk *chunk, channels []
 					case ch <- block:
 					case <-ctx.Done():
 						return
-					default:
-						idx.logger.Warn("channel full, skipping block")
+					case <-time.After(5 * time.Second):
+						// Add timeout instead of skipping immediately
+						idx.logger.Warn("channel full, timeout reached")
+						continue
 					}
 				}
 			}

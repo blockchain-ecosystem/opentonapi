@@ -148,7 +148,25 @@ func main() {
 }
 
 func cleanup(storage *litestorage.LiteStorage, idx *indexer.Indexer, storageBlockCh, pusherBlockCh chan indexer.IDandBlock) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Graceful shutdown
 	storage.Shutdown()
-	close(storageBlockCh)
-	close(pusherBlockCh)
+
+	// Drain channels before closing
+	for {
+		select {
+		case <-storageBlockCh:
+		case <-pusherBlockCh:
+		case <-ctx.Done():
+			close(storageBlockCh)
+			close(pusherBlockCh)
+			return
+		default:
+			close(storageBlockCh)
+			close(pusherBlockCh)
+			return
+		}
+	}
 }
