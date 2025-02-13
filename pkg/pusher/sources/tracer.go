@@ -3,6 +3,7 @@ package sources
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -103,13 +104,20 @@ func (t *Tracer) Run(ctx context.Context) {
 		go func(txEvent TransactionEventData) {
 			var hash tongo.Bits256
 			if err := hash.FromHex(txEvent.TxHash); err != nil {
-				// this should never happen
 				t.logger.Error("hash.FromHex() failed", zap.Error(err))
 				return
 			}
+
+			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+
 			for i := 0; i < 15; i++ {
 				trace, err := t.storage.GetTrace(ctx, hash)
 				if err != nil {
+					if errors.Is(err, context.DeadlineExceeded) {
+						t.logger.Error("trace retrieval timeout", zap.Error(err))
+						return
+					}
 					time.Sleep(1 * time.Second)
 					continue
 				}

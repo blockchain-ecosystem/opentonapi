@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go"
+	"github.com/labstack/gommon/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/puzpuzpuz/xsync/v2"
@@ -129,7 +130,11 @@ func WithBlockChannel(ch <-chan indexer.IDandBlock) Option {
 
 type Option func(o *Options)
 
-func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*LiteStorage, error) {
+func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*LiteStorage, error) {
+	if cli == nil {
+		return nil, fmt.Errorf("lite client cannot be nil")
+	}
+
 	o := &Options{}
 	for i := range opts {
 		opts[i](o)
@@ -144,7 +149,7 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 	}
 
 	storage := &LiteStorage{
-		logger: log,
+		logger: logger,
 		// TODO: introduce an env variable to configure this number
 		maxGoroutines: 5,
 		client:        cli,

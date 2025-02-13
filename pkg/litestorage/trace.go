@@ -27,6 +27,9 @@ var (
 )
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+	if s.client == nil {
+		return nil, fmt.Errorf("lite client not initialized")
+	}
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
 		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
 	}))
@@ -117,19 +120,19 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
 	var blockIDExt tongo.BlockIDExt
 	var block *tlb.Block
-	
+
 	err := retry.Do(func() error {
 		var err error
 		blockIDExt, _, err = s.client.LookupBlock(ctx, blockID, 1, nil, nil)
 		if err != nil {
 			return err
 		}
-		
+
 		if b, prs := s.blockCache.Load(blockIDExt); prs {
 			block = b
 			return nil
 		}
-		
+
 		b, err := s.client.GetBlock(ctx, blockIDExt)
 		if err != nil {
 			return err
@@ -137,10 +140,10 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 		block = &b
 		s.blockCache.Store(blockIDExt, block)
 		return nil
-	}, 
-	retry.Attempts(3),
-	retry.Delay(time.Second),
-	retry.DelayType(retry.BackOffDelay))
+	},
+		retry.Attempts(3),
+		retry.Delay(time.Second),
+		retry.DelayType(retry.BackOffDelay))
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
