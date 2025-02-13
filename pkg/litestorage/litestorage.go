@@ -334,7 +334,7 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 			go func(accID tongo.AccountID) {
 				defer func() { <-workers }() // Release worker slot
 				
-				if err := s.processTransactions(accID, block, blockID); err != nil {
+				if err := s.processTransactions(accID, block, tongo.BlockIDExt{BlockID: blockID.BlockID}); err != nil {
 					s.logger.Error("failed to process transactions",
 						zap.String("account", accID.String()),
 						zap.Error(err))
@@ -344,7 +344,7 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	}
 }
 
-func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockIDExt tongo.BlockIDExt) error {
+func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockID tongo.BlockIDExt) error {
 	s.logger.Debug("processing transactions", 
 		zap.String("account", accountID.String()),
 		zap.Int("tx_count", len(block.AllTransactions())))
@@ -356,7 +356,7 @@ func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.
 		
 		transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
 			Transaction: *tx,
-			BlockID:    blockIDExt,
+			BlockID:    blockID,
 		}, nil)
 		
 		if err != nil {
@@ -909,4 +909,74 @@ func (s *LiteStorage) clearCaches() {
 	}
 	
 	s.metrics.dbOperations.WithLabelValues("cache", "clear").Inc()
+}
+
+func (s *LiteStorage) SaveBlock(blockIDExt tongo.BlockIDExt, block *tlb.Block) error {
+	// Store in memory cache first
+	s.blockCache.Store(blockIDExt, block)
+
+	// Store in BadgerDB with TTL
+	err := s.db.Update(func(txn *badger.Txn) error {
+		data, err := json.Marshal(block)
+		if err != nil {
+			return fmt.Errorf("marshal block: %w", err)
+		}
+
+		key := append([]byte(prefixBlock), []byte(blockIDExt.BlockID.String())...)
+		entry := badger.NewEntry(key, data).WithTTL(BlockCacheTTL)
+		
+		s.logger.Debug("saving block to BadgerDB",
+			zap.String("block_id", blockIDExt.BlockID.String()),
+			zap.Int("data_size", len(data)))
+			
+		return txn.SetEntry(entry)
+	})
+
+	if err != nil {
+		s.logger.Error("failed to save block",
+			zap.String("block_id", blockIDExt.BlockID.String()),
+			zap.Error(err))
+		return err
+	}
+
+	return nil
+}
+
+func (s *LiteStorage) GetBlock(ctx context.Context, id tongo.BlockID) (*tlb.Block, error) {
+	s.logger.Debug("getting block", zap.String("block_id", id.String()))
+
+	// Try memory cache first - convert BlockID to BlockIDExt for cache lookup
+	blockIDExt := tongo.BlockIDExt{BlockID: id}
+	if block, ok := s.blockCache.Load(blockIDExt); ok {
+		s.logger.Debug("block found in cache", zap.String("block_id", id.String()))
+		return block, nil
+	}
+
+	// Try BadgerDB
+	var block tlb.Block
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := append([]byte(prefixBlock), []byte(id.String())...)
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			s.logger.Debug("block not found in BadgerDB", zap.String("block_id", id.String()))
+			return fmt.Errorf("block not found: %v", id)
+		}
+		if err != nil {
+			return fmt.Errorf("get block: %w", err)
+		}
+
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &block)
+		})
+	})
+
+	if err != nil {
+		s.logger.Error("failed to get block", 
+			zap.String("block_id", id.String()),
+			zap.Error(err))
+		return nil, err
+	}
+
+	s.logger.Debug("block found in BadgerDB", zap.String("block_id", id.String()))
+	return &block, nil
 }
