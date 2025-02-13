@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/internal/g"
 	"github.com/tonkeeper/opentonapi/pkg/bath"
@@ -79,7 +78,6 @@ func (h *Handler) convertNFT(ctx context.Context, item core.NftItem, book addres
 		nftItem.Trust = oas.TrustType(core.TrustWhitelist)
 	} else {
 		nftTrust := h.spamFilter.NftTrust(item.Address, item.CollectionAddress, description, image)
-		h.logger.Warn("convertNft", zap.String("account id", item.Address.ToRaw()), zap.String("nftTrust", string(nftTrust)))
 		if nftTrust == core.TrustNone && trustType != "" {
 			nftTrust = trustType
 		}
