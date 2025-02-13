@@ -3,6 +3,7 @@ package litestorage
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -25,6 +26,7 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/core"
@@ -58,14 +60,14 @@ type CacheOptions struct {
 }
 
 type LiteStorage struct {
-	logger                  *zap.Logger
-	client                  *liteapi.Client
-	executor                abi.Executor
-	jettonMetaCache         *xsync.MapOf[string, tep64.Metadata]
-	transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
-	transactionsByInMsgLT   *xsync.MapOf[inMsgCreatedLT, tongo.Bits256]
-	blockCache              *xsync.MapOf[tongo.BlockIDExt, *tlb.Block]
-	accountInterfacesCache  *xsync.MapOf[tongo.AccountID, []abi.ContractInterface]
+	logger          *zap.Logger
+	client          *liteapi.Client
+	executor        abi.Executor
+	jettonMetaCache *xsync.MapOf[string, tep64.Metadata]
+	// transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
+	// transactionsByInMsgLT   *xsync.MapOf[inMsgCreatedLT, tongo.Bits256]
+	blockCache             *xsync.MapOf[tongo.BlockIDExt, *tlb.Block]
+	accountInterfacesCache *xsync.MapOf[tongo.AccountID, []abi.ContractInterface]
 	// tvmLibraryCache contains public tvm libraries.
 	// As a library is immutable, it's ok to cache it.
 	tvmLibraryCache cache.Cache[string, boc.Cell]
@@ -84,7 +86,7 @@ type LiteStorage struct {
 	// it's performance optimization.
 	// tmv and txEmulator work much faster with a smaller config.
 	trimmedConfigBase64 string
-	db                  *BadgerDBStorage
+	db                  *badger.DB
 }
 
 type Options struct {
@@ -160,15 +162,15 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		// trackingAccounts: map[tongo.AccountID]struct{}{},
 		// data for concurrent access
 		// TODO: implement expiration logic for the caches below.
-		jettonMetaCache:         xsync.NewMapOf[tep64.Metadata](),
-		transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
-		transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
-		blockCache:              xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
-		accountInterfacesCache:  xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
-		pubKeyByAccountID:       xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
-		tvmLibraryCache:         cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
-		configCache:             cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
-		db:                      db,
+		jettonMetaCache: xsync.NewMapOf[tep64.Metadata](),
+		// transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
+		// transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
+		blockCache:             xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
+		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
+		pubKeyByAccountID:      xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
+		tvmLibraryCache:        cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
+		configCache:            cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
+		db:                     db.db,
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons
@@ -207,6 +209,58 @@ func (s *LiteStorage) Shutdown() {
 	s.stopCh <- struct{}{}
 }
 
+func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		key := append([]byte("tx:"), hash[:]...)
+		value, err := json.Marshal(tx)
+		if err != nil {
+			return err
+		}
+		return txn.Set(key, value)
+	})
+}
+
+func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, error) {
+	var tx core.Transaction
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := append([]byte("tx:"), hash[:]...)
+		item, err := txn.Get(key)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &tx)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &tx, nil
+}
+
+func (s *LiteStorage) StoreTransactionByInMsgLT(accountID string, createLT uint64, hash tongo.Bits256) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
+		return txn.Set(key, hash[:]) // Store hash as value
+	})
+}
+
+func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64) (tongo.Bits256, error) {
+	var hash tongo.Bits256
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
+		item, err := txn.Get(key)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			copy(hash[:], val) // Convert bytes back to hash
+			return nil
+		})
+	})
+	return hash, err
+}
+
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	if ch == nil {
 		return
@@ -214,24 +268,24 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	for block := range ch {
 		for _, tx := range block.Block.AllTransactions() {
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
-			// if _, ok := s.trackingAccounts[accountID]; ok {
 			hash := tongo.Bits256(tx.Hash())
-			transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
+			transaction, err := core.ConvertTransaction(block.ID.Workchain,
+				tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
 			if err != nil {
 				s.logger.Error("failed to process tx",
 					zap.String("tx-hash", hash.Hex()),
 					zap.Error(err))
 				continue
 			}
-			s.transactionsIndexByHash.Store(hash, transaction)
+			if err := s.storeTransaction(hash, transaction); err != nil {
+				s.logger.Error("failed to store tx", zap.Error(err))
+			}
+
 			createLT, ok := extractInMsgCreatedLT(accountID, tx)
 			if ok {
-				s.transactionsByInMsgLT.Store(createLT, hash)
+				// s.transactionsByInMsgLT.Store(createLT, hash)
+				s.StoreTransactionByInMsgLT(accountID.String(), createLT.lt, hash)
 			}
-			fmt.Printf("tx: %s\n", hash.Hex())
-			fmt.Printf("createLT: %v\n", createLT)
-			fmt.Printf("ok: %v\n", ok)
-			// }
 		}
 	}
 }
@@ -320,10 +374,12 @@ func (s *LiteStorage) preloadAccount(a tongo.AccountID) error {
 			return err
 		}
 		hash := tongo.Bits256(tx.Hash())
-		s.transactionsIndexByHash.Store(hash, t)
+		// s.transactionsIndexByHash.Store(hash, t)
+		s.storeTransaction(hash, t)
 		createLT, ok := extractInMsgCreatedLT(a, &tx.Transaction)
 		if ok {
-			s.transactionsByInMsgLT.Store(createLT, hash)
+			// s.transactionsByInMsgLT.Store(createLT, hash)
+			s.StoreTransactionByInMsgLT(a.String(), createLT.lt, hash)
 		}
 	}
 	return nil
@@ -356,10 +412,12 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 			return err
 		}
 		hash := tongo.Bits256(tx.Hash())
-		s.transactionsIndexByHash.Store(hash, t)
+		// s.transactionsIndexByHash.Store(hash, t)
+		s.storeTransaction(hash, t)
 		createLT, ok := extractInMsgCreatedLT(accountID, tx)
 		if ok {
-			s.transactionsByInMsgLT.Store(createLT, hash)
+			// s.transactionsByInMsgLT.Store(createLT, hash)
+			s.StoreTransactionByInMsgLT(accountID.String(), createLT.lt, hash)
 		}
 	}
 	return nil
@@ -427,11 +485,11 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		storageTimeHistogramVec.WithLabelValues("get_transaction").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	tx, prs := s.transactionsIndexByHash.Load(hash)
-	if prs {
-		return tx, nil
+	tx, err := s.getTransaction(hash)
+	if err != nil {
+		return nil, fmt.Errorf("not found tx %x", hash)
 	}
-	return nil, fmt.Errorf("not found tx %x", hash)
+	return tx, nil
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
@@ -468,12 +526,12 @@ func (s *LiteStorage) GetBlockTransactions(ctx context.Context, id tongo.BlockID
 }
 
 func (s *LiteStorage) searchTxInCache(a tongo.AccountID, lt uint64) *core.Transaction {
-	hash, ok := s.transactionsByInMsgLT.Load(inMsgCreatedLT{account: a, lt: lt})
-	if !ok {
+	hash, err := s.GetTransactionByInMsgLT(a.String(), lt)
+	if err != nil {
 		return nil
 	}
-	tx, ok := s.transactionsIndexByHash.Load(hash)
-	if !ok {
+	tx, err := s.getTransaction(hash)
+	if err != nil {
 		return nil
 	}
 	return tx

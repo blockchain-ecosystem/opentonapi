@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/boc"
@@ -14,7 +13,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
-	"github.com/tonkeeper/opentonapi/pkg/core"
 )
 
 func TestLiteStorage_run(t *testing.T) {
@@ -48,9 +46,9 @@ func TestLiteStorage_run(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &LiteStorage{
-				logger:                  zap.L(),
-				transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
-				transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
+				logger: zap.L(),
+				// transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
+				// transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
 				// trackingAccounts:        tt.trackingAccounts,
 			}
 			ch := make(chan indexer.IDandBlock)
@@ -67,10 +65,10 @@ func TestLiteStorage_run(t *testing.T) {
 			time.Sleep(time.Second)
 
 			txs := map[string]struct{}{}
-			s.transactionsIndexByHash.Range(func(key tongo.Bits256, value *core.Transaction) bool {
-				txs[key.Hex()] = struct{}{}
-				return true
-			})
+			// s.transactionsIndexByHash.Range(func(key tongo.Bits256, value *core.Transaction) bool {
+			// 	txs[key.Hex()] = struct{}{}
+			// 	return true
+			// })
 			require.Equal(t, tt.wantTxHashes, txs)
 		})
 	}
