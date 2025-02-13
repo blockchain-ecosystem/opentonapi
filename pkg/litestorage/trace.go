@@ -36,6 +36,8 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 	if s.client == nil {
 		return nil, fmt.Errorf("lite client not initialized")
 	}
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
 		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
 	}))
@@ -150,6 +152,9 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
+	ctx, cancel := s.withTimeout(ctx)
+	defer cancel()
+
 	var blockIDExt tongo.BlockIDExt
 	var block *tlb.Block
 

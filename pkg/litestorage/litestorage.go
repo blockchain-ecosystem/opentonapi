@@ -658,3 +658,8 @@ func (s *LiteStorage) getClient() (*liteapi.Client, func()) {
 		s.connPool.Put(client)
 	}
 }
+
+// Add context timeout wrapper
+func (s *LiteStorage) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.timeout)
+}
