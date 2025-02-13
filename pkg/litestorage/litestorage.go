@@ -591,15 +591,8 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Debug("getting transaction", zap.String("hash", hash.Hex()))
+	s.logger.Debug("getting transaction from BadgerDB", zap.String("hash", hash.Hex()))
 
-	// First try to get from cache
-	if tx, ok := s.transactionsIndexByHash.Load(hash); ok {
-		s.logger.Debug("transaction found in cache", zap.String("hash", hash.Hex()))
-		return tx, nil
-	}
-
-	// Then try to get from BadgerDB
 	var tx core.Transaction
 	err := s.db.View(func(txn *badger.Txn) error {
 		key := append([]byte("tx:"), []byte(hash.Hex())...)
@@ -628,7 +621,6 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	}
 
 	s.logger.Debug("transaction found in BadgerDB", zap.String("hash", hash.Hex()))
-	s.transactionsIndexByHash.Store(hash, &tx)
 	return &tx, nil
 }
 
