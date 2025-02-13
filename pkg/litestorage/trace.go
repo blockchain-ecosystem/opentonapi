@@ -97,12 +97,12 @@ func (s *LiteStorage) recursiveGetChildren(ctx context.Context, tx core.Transact
 }
 
 func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth int) (*core.Transaction, error) {
-	if depth > maxDepthLimit {
-		return nil, fmt.Errorf("max depth limit reached")
+	if depth >= maxDepthLimit {
+		return nil, fmt.Errorf("max recursion depth reached (%d)", maxDepthLimit)
 	}
 
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	if tx == nil {
@@ -115,7 +115,11 @@ func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth 
 
 	parentTx, err := s.searchTransactionNearBlock(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find parent tx: %w", err)
+		return nil, fmt.Errorf("failed to find parent transaction: %w", err)
+	}
+
+	if parentTx == nil {
+		return tx, nil
 	}
 
 	return s.findRoot(ctx, parentTx, depth+1)
