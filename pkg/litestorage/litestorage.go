@@ -173,10 +173,10 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		tvmLibraryCache:        cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:            cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
 		db:                     db,
-		maxConns:               50, // Configurable max connections
+		maxConns:               10,
 		connPool: sync.Pool{
 			New: func() interface{} {
-				return &liteapi.Client{}
+				return cli
 			},
 		},
 	}

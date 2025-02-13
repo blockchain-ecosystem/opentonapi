@@ -39,7 +39,8 @@ func main() {
 	cfg := config.Load()
 	log := app.Logger(cfg.App.LogLevel)
 
-	storageBlockCh := make(chan indexer.IDandBlock)
+	storageBlockCh := make(chan indexer.IDandBlock, 1000)
+	pusherBlockCh := make(chan indexer.IDandBlock, 1000)
 
 	var err error
 	var client *liteapi.Client
@@ -89,7 +90,7 @@ func main() {
 		log.Fatal("failed to create api handler", zap.Error(err))
 	}
 	source := sources.NewBlockchainSource(log, client)
-	pusherBlockCh := source.Run(ctx)
+	pusherBlockCh = source.Run(ctx)
 
 	// Add readiness check here
 	ready := make(chan struct{})
@@ -112,7 +113,7 @@ func main() {
 		log.Fatal("initialization cancelled")
 	}
 
-	tracer := sources.NewTracer(log, storage, source)
+	tracer := sources.NewTracer(log, storage, source, sources.WithCircuitBreaker())
 	go tracer.Run(ctx)
 
 	idx := indexer.New(log, client)
@@ -142,4 +143,12 @@ func main() {
 
 	log.Warn("start server", zap.Int("port", cfg.API.Port))
 	server.Run(fmt.Sprintf(":%d", cfg.API.Port), cfg.API.UnixSockets)
+
+	defer cleanup(storage, idx, storageBlockCh, pusherBlockCh)
+}
+
+func cleanup(storage *litestorage.LiteStorage, idx *indexer.Indexer, storageBlockCh, pusherBlockCh chan indexer.IDandBlock) {
+	storage.Shutdown()
+	close(storageBlockCh)
+	close(pusherBlockCh)
 }

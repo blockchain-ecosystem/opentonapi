@@ -42,6 +42,16 @@ type dispatcher interface {
 	RegisterSubscriber(fn DeliveryFn, options SubscribeToTraceOptions) CancelFn
 }
 
+type TracerOption func(*Tracer)
+
+func WithCircuitBreaker() TracerOption {
+	return func(t *Tracer) {
+		t.breaker = &CircuitBreaker{
+			timeout: time.Now(),
+		}
+	}
+}
+
 type Tracer struct {
 	logger     *zap.Logger
 	storage    storage
@@ -56,16 +66,22 @@ type Tracer struct {
 	// so we use a mutex to serialize access to the cache.
 	mu         sync.Mutex
 	traceCache cache.Cache[string, struct{}]
+
+	breaker *CircuitBreaker
 }
 
-func NewTracer(logger *zap.Logger, storage storage, source TransactionSource) *Tracer {
-	return &Tracer{
+func NewTracer(logger *zap.Logger, storage storage, source TransactionSource, opts ...TracerOption) *Tracer {
+	t := &Tracer{
 		logger:     logger,
 		storage:    storage,
 		source:     source,
 		dispatcher: NewTraceDispatcher(logger),
 		traceCache: cache.NewLRUCache[string, struct{}](10000, "tracer_trace_cache"),
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 var _ TraceSource = (*Tracer)(nil)
@@ -192,4 +208,16 @@ func (t *Tracer) dispatch(trace *core.Trace) {
 	}
 
 	t.dispatcher.Dispatch(accounts, eventJSON)
+}
+
+type CircuitBreaker struct {
+	failures int32
+	timeout  time.Time
+	mu       sync.RWMutex
+}
+
+func (t *Tracer) shouldProcess() bool {
+	t.breaker.mu.RLock()
+	defer t.breaker.mu.RUnlock()
+	return time.Now().After(t.breaker.timeout)
 }
