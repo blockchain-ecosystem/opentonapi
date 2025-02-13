@@ -591,14 +591,27 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	var tx *core.Transaction
+	s.logger.Debug("getting transaction", zap.String("hash", hash.Hex()))
+
+	// First try to get from cache
+	if tx, ok := s.transactionsIndexByHash.Load(hash); ok {
+		s.logger.Debug("transaction found in cache", zap.String("hash", hash.Hex()))
+		return tx, nil
+	}
+
+	// Then try to get from BadgerDB
+	var tx core.Transaction
 	err := s.db.View(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), hash[:]...)
+		key := append([]byte("tx:"), []byte(hash.Hex())...)
+		s.logger.Debug("searching in BadgerDB", zap.String("key", string(key)))
+		
 		item, err := txn.Get(key)
 		if err == badger.ErrKeyNotFound {
-			return core.ErrTransactionNotFound
+			s.logger.Debug("transaction not found in BadgerDB", zap.String("hash", hash.Hex()))
+			return core.ErrEntityNotFound
 		}
 		if err != nil {
+			s.logger.Error("BadgerDB error", zap.Error(err))
 			return fmt.Errorf("get transaction: %w", err)
 		}
 		
@@ -606,11 +619,17 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 			return json.Unmarshal(val, &tx)
 		})
 	})
-	
+
 	if err != nil {
+		s.logger.Error("failed to get transaction", 
+			zap.String("hash", hash.Hex()),
+			zap.Error(err))
 		return nil, err
 	}
-	return tx, nil
+
+	s.logger.Debug("transaction found in BadgerDB", zap.String("hash", hash.Hex()))
+	s.transactionsIndexByHash.Store(hash, &tx)
+	return &tx, nil
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
@@ -811,12 +830,37 @@ func (b *BadgerStorage) BatchSetTransactions(txs []*core.Transaction) error {
 
 // Example usage in other methods
 func (s *LiteStorage) SaveTransaction(tx *core.Transaction) error {
-	key := makeTransactionKey(tx.Hash)
-	value, err := json.Marshal(tx)
+	// Store in memory cache
+	s.transactionsIndexByHash.Store(tx.Hash, tx)
+
+	// Store in BadgerDB
+	err := s.db.Update(func(txn *badger.Txn) error {
+		data, err := json.Marshal(tx)
+		if err != nil {
+			return fmt.Errorf("marshal transaction: %w", err)
+		}
+
+		key := append([]byte("tx:"), []byte(tx.Hash.Hex())...)
+		if err := txn.Set(key, data); err != nil {
+			return fmt.Errorf("set transaction: %w", err)
+		}
+		
+		// Log successful storage
+		s.logger.Debug("transaction saved", 
+			zap.String("hash", tx.Hash.Hex()),
+			zap.Int("data_size", len(data)))
+		
+		return nil
+	})
+
 	if err != nil {
+		s.logger.Error("failed to save transaction",
+			zap.String("hash", tx.Hash.Hex()),
+			zap.Error(err))
 		return err
 	}
-	return s.Set(key, value)
+
+	return nil
 }
 
 func makeTransactionKey(hash tongo.Bits256) []byte {

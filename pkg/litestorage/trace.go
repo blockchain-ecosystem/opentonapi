@@ -32,13 +32,19 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get trace: %w", err)
 	}
 	
-	// Convert Transaction to Trace
-	trace := &core.Trace{
-		Transaction: *tx,
-		Children:    make([]*core.Trace, 0),
+	// Get root transaction
+	rootTx, err := s.findRoot(ctx, tx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find root: %w", err)
 	}
 	
-	return trace, nil
+	// Build full trace tree
+	trace, err := s.recursiveGetChildren(ctx, *rootTx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build trace tree: %w", err)
+	}
+	
+	return &trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
