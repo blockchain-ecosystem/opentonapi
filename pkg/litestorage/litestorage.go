@@ -590,38 +590,26 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_transaction").Observe(v)
-	}))
-	defer timer.ObserveDuration()
-	
-	// Check memory cache first
-	if tx, prs := s.transactionsIndexByHash.Load(hash); prs {
-		return tx, nil
-	}
-	
-	// Check persistent storage
-	var tx core.Transaction
-	err := s.persistent.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte(prefixTx + hash.Hex()))
-		if err != nil {
-			return err
+	var tx *core.Transaction
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := append([]byte("tx:"), hash[:]...)
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return core.ErrTransactionNotFound
 		}
+		if err != nil {
+			return fmt.Errorf("get transaction: %w", err)
+		}
+		
 		return item.Value(func(val []byte) error {
 			return json.Unmarshal(val, &tx)
 		})
 	})
 	
-	if err == badger.ErrKeyNotFound {
-		return nil, fmt.Errorf("not found tx %x", hash)
-	}
 	if err != nil {
 		return nil, err
 	}
-	
-	// Update memory cache
-	s.transactionsIndexByHash.Store(hash, &tx)
-	return &tx, nil
+	return tx, nil
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
