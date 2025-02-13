@@ -14,6 +14,7 @@ import (
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -90,6 +91,13 @@ func (t *Tracer) Run(ctx context.Context) {
 
 	defer cancelFn()
 
+	// Create a worker pool with limited concurrency
+	const workerCount = 50
+	sem := make(chan struct{}, workerCount)
+
+	// Create an error group for managed goroutines
+	g, ctx := errgroup.WithContext(ctx)
+
 	limiter := ratelimiter.NewDefaultLimiter(300, 10*time.Second)
 	defer limiter.Kill()
 
@@ -101,31 +109,47 @@ func (t *Tracer) Run(ctx context.Context) {
 			traceNumber.With(map[string]string{"type": "dropped"}).Inc()
 			continue
 		}
-		go func(txEvent TransactionEventData) {
+
+		txEvent := txEvent // Create new variable for goroutine
+		sem <- struct{}{}  // Acquire semaphore
+
+		g.Go(func() error {
+			defer func() { <-sem }() // Release semaphore
+
 			var hash tongo.Bits256
 			if err := hash.FromHex(txEvent.TxHash); err != nil {
 				t.logger.Error("hash.FromHex() failed", zap.Error(err))
-				return
+				return nil
 			}
 
 			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 
-			for i := 0; i < 15; i++ {
+			// Use exponential backoff for retries
+			backoff := time.Second
+			for i := 0; i < 10; i++ { // Reduced retry count
 				trace, err := t.storage.GetTrace(ctx, hash)
 				if err != nil {
 					if errors.Is(err, context.DeadlineExceeded) {
 						t.logger.Error("trace retrieval timeout", zap.Error(err))
-						return
+						return nil
 					}
-					time.Sleep(1 * time.Second)
+					if i < 4 { // Don't sleep on last attempt
+						time.Sleep(backoff)
+						backoff *= 2 // Exponential backoff
+					}
 					continue
 				}
 				t.dispatch(trace)
-				return
+				return nil
 			}
 			traceNumber.With(map[string]string{"type": "failed-to-load"}).Inc()
-		}(txEvent)
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		t.logger.Error("worker pool error", zap.Error(err))
 	}
 }
 
