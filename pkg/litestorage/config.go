@@ -2,9 +2,10 @@ package litestorage
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
-	cache "github.com/Code-Hex/go-generics-cache"
+	"github.com/dgraph-io/badger/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo/boc"
@@ -47,22 +48,51 @@ func (c *LiteStorage) GetLastConfig(ctx context.Context) (ton.BlockchainConfig, 
 		storageTimeHistogramVec.WithLabelValues("get_last_config").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	config, prs := c.configCache.Get(1)
-	if prs {
-		return config, nil
 
-	}
-	rawConfig, err := c.client.GetConfigAll(ctx, 0)
+	// First try to get from BadgerDB
+	var config ton.BlockchainConfig
+	err := c.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("config:last"))
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &config)
+		})
+	})
 	if err != nil {
 		return ton.BlockchainConfig{}, err
 	}
-	configP, err := ton.ConvertBlockchainConfigStrict(rawConfig)
-	if err != nil {
-		return ton.BlockchainConfig{}, err
+
+	// If not in DB, fetch from client
+	if config == (ton.BlockchainConfig{}) {
+		rawConfig, err := c.client.GetConfigAll(ctx, 0)
+		if err != nil {
+			return ton.BlockchainConfig{}, err
+		}
+		configP, err := ton.ConvertBlockchainConfigStrict(rawConfig)
+		if err != nil {
+			return ton.BlockchainConfig{}, err
+		}
+		config = *configP
+
+		// Store in DB for future use
+		err = c.db.Update(func(txn *badger.Txn) error {
+			data, err := json.Marshal(config)
+			if err != nil {
+				return err
+			}
+			return txn.Set([]byte("config:last"), data)
+		})
+		if err != nil {
+			c.logger.Error("failed to cache config", zap.Error(err))
+		}
 	}
 
-	c.configCache.Set(1, *configP, cache.WithExpiration(time.Second*2)) //todo: remove
-	return *configP, err
+	return config, nil
 }
 
 func (c *LiteStorage) GetConfigFromBlock(ctx context.Context, id ton.BlockID) (tlb.ConfigParams, error) {
