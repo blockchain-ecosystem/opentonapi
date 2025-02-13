@@ -57,46 +57,68 @@ func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit
 }
 
 func (s *LiteStorage) recursiveGetChildren(ctx context.Context, tx core.Transaction, depth int) (core.Trace, error) {
+	if depth > maxDepthLimit {
+		return core.Trace{}, fmt.Errorf("max depth limit reached")
+	}
+
+	if ctx.Err() != nil {
+		return core.Trace{}, ctx.Err()
+	}
+
 	trace := core.Trace{Transaction: tx}
 	externalMessages := make([]core.Message, 0, len(tx.OutMsgs))
+
 	for _, m := range tx.OutMsgs {
 		if m.Destination == nil {
 			externalMessages = append(externalMessages, m)
 			continue
 		}
-		tx, err := s.searchTransactionNearBlock(ctx, *m.Destination, m.CreatedLt, tx.BlockID, false, depth+1)
+
+		childTx, err := s.searchTransactionNearBlock(ctx, *m.Destination, m.CreatedLt, tx.BlockID, false, depth+1)
 		if err != nil {
-			return core.Trace{}, err
+			return core.Trace{}, fmt.Errorf("failed to find child tx: %w", err)
 		}
-		child, err := s.recursiveGetChildren(ctx, *tx, depth+1)
+
+		child, err := s.recursiveGetChildren(ctx, *childTx, depth+1)
 		if err != nil {
 			return core.Trace{}, err
 		}
 		trace.Children = append(trace.Children, &child)
 	}
-	var err error
-	trace.AccountInterfaces, err = s.getAccountInterfaces(ctx, tx.Account)
+
+	interfaces, err := s.getAccountInterfaces(ctx, tx.Account)
 	if err != nil {
-		return core.Trace{}, nil
+		return core.Trace{}, fmt.Errorf("failed to get interfaces: %w", err)
 	}
+
+	trace.AccountInterfaces = interfaces
 	trace.OutMsgs = externalMessages
 	return trace, nil
 }
 
 func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth int) (*core.Transaction, error) {
+	if depth > maxDepthLimit {
+		return nil, fmt.Errorf("max depth limit reached")
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	if tx == nil {
 		return nil, fmt.Errorf("can't find root of nil transaction")
 	}
+
 	if tx.InMsg == nil || tx.InMsg.IsExternal() || tx.InMsg.IsEmission() {
 		return tx, nil
 	}
-	var err error
-	tx, err = s.searchTransactionNearBlock(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
+
+	parentTx, err := s.searchTransactionNearBlock(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find parent tx: %w", err)
 	}
 
-	return s.findRoot(ctx, tx, depth+1)
+	return s.findRoot(ctx, parentTx, depth+1)
 }
 
 func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool, depth int) (*core.Transaction, error) {
