@@ -344,65 +344,29 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	}
 }
 
-func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockID tongo.BlockIDExt) error {
-	s.logger.Debug("processing transactions", 
-		zap.String("account", accountID.String()),
-		zap.Int("tx_count", len(block.AllTransactions())))
-
-	txs := make([]*core.Transaction, 0, len(block.AllTransactions()))
-	
+func (s *LiteStorage) processTransactions(accountID tongo.AccountID, block *tlb.Block, blockIDExt tongo.BlockIDExt) error {
 	for _, tx := range block.AllTransactions() {
-		hash := tongo.Bits256(tx.Hash())
-		
 		transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{
 			Transaction: *tx,
-			BlockID:    blockID,
+			BlockID:    blockIDExt,
 		}, nil)
 		
 		if err != nil {
-			s.logger.Error("failed to convert tx",
-				zap.String("tx_hash", hash.Hex()),
+			s.logger.Error("failed to convert transaction",
+				zap.String("tx_hash", tx.Hash().Hex()),
 				zap.Error(err))
 			continue
 		}
 
-		// Store individual transaction immediately
-		err = s.SaveTransaction(transaction)
-		if err != nil {
+		if err := s.SaveTransaction(transaction); err != nil {
 			s.logger.Error("failed to save transaction",
-				zap.String("tx_hash", hash.Hex()),
+				zap.String("tx_hash", transaction.Hash.Hex()),
 				zap.Error(err))
 			continue
 		}
 
 		s.logger.Debug("transaction processed and saved",
-			zap.String("tx_hash", hash.Hex()))
-
-		txs = append(txs, transaction)
-
-		if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
-			s.transactionsByInMsgLT.Store(createLT, hash)
-		}
-	}
-
-	// Batch store with retry
-	err := retry.Do(
-		func() error {
-			return s.persistent.BatchSetTransactions(txs)
-		},
-		retry.Attempts(3),
-		retry.Delay(100*time.Millisecond),
-		retry.DelayType(retry.BackOffDelay),
-	)
-
-	if err != nil {
-		s.logger.Error("failed to batch store transactions", zap.Error(err))
-		return err
-	}
-
-	// Update memory cache
-	for _, tx := range txs {
-		s.transactionsIndexByHash.Store(tx.Hash, tx)
+			zap.String("tx_hash", transaction.Hash.Hex()))
 	}
 
 	return nil
@@ -828,19 +792,19 @@ func (s *LiteStorage) SaveTransaction(tx *core.Transaction) error {
 	// Store in memory cache
 	s.transactionsIndexByHash.Store(tx.Hash, tx)
 
-	// Store in BadgerDB
+	// Store in BadgerDB with TTL
 	err := s.db.Update(func(txn *badger.Txn) error {
 		data, err := json.Marshal(tx)
 		if err != nil {
 			return fmt.Errorf("marshal transaction: %w", err)
 		}
 
-		key := append([]byte("tx:"), []byte(tx.Hash.Hex())...)
-		if err := txn.Set(key, data); err != nil {
+		key := makeTransactionKey(tx.Hash)
+		entry := badger.NewEntry(key, data).WithTTL(BadgerTTL)
+		if err := txn.SetEntry(entry); err != nil {
 			return fmt.Errorf("set transaction: %w", err)
 		}
 		
-		// Log successful storage
 		s.logger.Debug("transaction saved", 
 			zap.String("hash", tx.Hash.Hex()),
 			zap.Int("data_size", len(data)))
