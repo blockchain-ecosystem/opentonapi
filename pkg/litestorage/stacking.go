@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/references"
 	"github.com/tonkeeper/tongo"
@@ -65,26 +66,41 @@ func (s *LiteStorage) GetParticipatingInTfPools(ctx context.Context, member tong
 	}))
 	defer timer.ObserveDuration()
 	var result []core.Nominator
-	for _, a := range s.knownAccounts["tf_pools"] {
-		var i big.Int
-		i.SetBytes(member.Address[:])
-		_, p, err := abi.GetNominatorData(ctx, s.executor, a, tlb.Int257(i))
-		if err != nil {
-			continue
-		}
-		if data, ok := p.(abi.GetNominatorDataResult); ok {
-			nominator := core.Nominator{
-				Pool:                 a,
-				Member:               member,
-				MemberPendingDeposit: int64(data.PendingDepositAmount),
-				MemberBalance:        int64(data.Amount),
+	
+	// Get all TF pools from DB
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("tf_pool:")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		
+		for it.Rewind(); it.Valid(); it.Next() {
+			if pool := parseAccountFromKey(it.Item().Key()); pool != (tongo.AccountID{}) {
+				var i big.Int
+				i.SetBytes(member.Address[:])
+				_, p, err := abi.GetNominatorData(ctx, s.executor, pool, tlb.Int257(i))
+				if err != nil {
+					continue
+				}
+				if data, ok := p.(abi.GetNominatorDataResult); ok {
+					nominator := core.Nominator{
+						Pool:                 pool,
+						Member:               member,
+						MemberPendingDeposit: int64(data.PendingDepositAmount),
+						MemberBalance:        int64(data.Amount),
+					}
+					if data.WithdrawFound {
+						nominator.MemberPendingWithdraw = nominator.MemberBalance
+						nominator.MemberBalance = 0
+					}
+					result = append(result, nominator)
+				}
 			}
-			if data.WithdrawFound {
-				nominator.MemberPendingWithdraw = nominator.MemberBalance
-				nominator.MemberBalance = 0
-			}
-			result = append(result, nominator)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -160,25 +176,34 @@ func (s *LiteStorage) GetTFPool(ctx context.Context, pool tongo.AccountID) (core
 		VerifiedSources:   bytes.Equal(hash, references.TFPoolCodeHash[:]),
 	}, nil
 }
+
 func (s *LiteStorage) GetTFPools(ctx context.Context, onlyVerified bool, availableFor *ton.AccountID) ([]core.TFPool, error) {
 	var result []core.TFPool
-	for _, a := range s.knownAccounts["tf_pools"] {
-		p, err := s.GetTFPool(ctx, a)
-		if err != nil {
-			continue
-		}
-		if availableFor != nil {
-			var i big.Int
-			i.SetBytes(availableFor.Address[:])
-			_, _, err := abi.GetNominatorData(ctx, s.executor, a, tlb.Int257(i))
-			if err != nil && p.Nominators >= p.MaxNominators {
-				continue
+	
+	// Get all TF pools from DB
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("tf_pool:")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		
+		for it.Rewind(); it.Valid(); it.Next() {
+			if pool := parseAccountFromKey(it.Item().Key()); pool != (tongo.AccountID{}) {
+				p, err := s.GetTFPool(ctx, pool)
+				if err != nil {
+					continue
+				}
+				result = append(result, p)
 			}
 		}
-		result = append(result, p)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
+
 func (s *LiteStorage) GetLiquidPool(ctx context.Context, pool tongo.AccountID) (core.LiquidPool, error) {
 	_, v, err := abi.GetPoolFullData(ctx, s.executor, pool)
 	if err != nil {

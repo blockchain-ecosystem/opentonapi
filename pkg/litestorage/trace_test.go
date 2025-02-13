@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/puzpuzpuz/xsync/v2"
 	"github.com/stretchr/testify/require"
+	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/liteapi"
@@ -17,7 +17,7 @@ func TestLiteStorage_getAccountInterfaces(t *testing.T) {
 	storage := LiteStorage{
 		client:                 cli,
 		executor:               cli,
-		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
+		accountInterfacesCache: cache.NewLRUCache[tongo.AccountID, []abi.ContractInterface](10000, "account_interfaces_cache"),
 	}
 
 	tests := []struct {

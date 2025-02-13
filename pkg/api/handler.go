@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/go-faster/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tonkeeper/opentonapi/pkg/chainstate"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/rates"
@@ -28,6 +29,12 @@ var _ oas.Handler = (*Handler)(nil)
 
 // ctxToDetails converts a request context to a details instance.
 type ctxToDetails func(ctx context.Context) any
+
+type HandlerMetrics struct {
+	requestLatency    *prometheus.HistogramVec
+	cacheHits         *prometheus.CounterVec
+	activeConnections prometheus.Gauge
+}
 
 type Handler struct {
 	logger *zap.Logger
@@ -65,6 +72,13 @@ type Handler struct {
 	mu         sync.Mutex
 	dns        *dns.DNS // todo: update when blockchain config changes
 	configPool *sync.Pool
+
+	metrics     *HandlerMetrics
+	dnsCache    cache.Cache[string, *dns.DNS]
+	
+	// Remove single mutex, use more granular locking
+	dnsmu       sync.RWMutex
+	configmu    sync.RWMutex
 }
 
 func (h *Handler) NewError(ctx context.Context, err error) *oas.ErrorStatusCode {
@@ -248,6 +262,10 @@ func NewHandler(logger *zap.Logger, opts ...Option) (*Handler, error) {
 		getMethodsCache:     cache.NewLRUCache[string, *oas.MethodExecutionResult](100000, "get_methods_cache"),
 		tonConnect:          tonConnect,
 		configPool:          configPool,
+		metrics:             &HandlerMetrics{},
+		dnsCache:            cache.NewLRUCache[string, *dns.DNS](10000, "dns_cache"),
+		dnsmu:               sync.RWMutex{},
+		configmu:            sync.RWMutex{},
 	}, nil
 }
 
@@ -258,4 +276,18 @@ func (h *Handler) GetJettonNormalizedMetadata(ctx context.Context, master tongo.
 		return NormalizeMetadata(meta, &info, core.TrustNone)
 	}
 	return NormalizeMetadata(meta, nil, h.spamFilter.JettonTrust(master, meta.Symbol, meta.Name, meta.Image))
+}
+
+func (h *Handler) getDNS() (*dns.DNS, error) {
+	h.dnsmu.RLock()
+	defer h.dnsmu.RUnlock()
+	// ... DNS lookup logic
+	return nil, nil
+}
+
+func (h *Handler) getConfig() (*ton.BlockchainConfig, error) {
+	h.configmu.RLock()
+	defer h.configmu.RUnlock()
+	// ... config lookup logic
+	return nil, nil
 }

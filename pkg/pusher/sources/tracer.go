@@ -11,7 +11,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/tonkeeper/opentonapi/pkg/cache" 
+	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/tongo"
 	"go.uber.org/zap"
@@ -70,10 +70,8 @@ func NewTracer(logger *zap.Logger, storage storage, source TransactionSource) *T
 var _ TraceSource = (*Tracer)(nil)
 
 func (t *Tracer) SubscribeToTraces(ctx context.Context, deliveryFn DeliveryFn, opts SubscribeToTraceOptions) CancelFn {
-	t.logger.Debug("subscribe to traces",
-		zap.Bool("all-accounts", opts.AllAccounts),
-		zap.Stringers("accounts", opts.Accounts))
-
+	// Always set AllAccounts to true to handle all accounts
+	opts.AllAccounts = true
 	return t.dispatcher.RegisterSubscriber(deliveryFn, opts)
 }
 

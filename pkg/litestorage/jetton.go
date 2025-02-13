@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/dgraph-io/badger/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/shopspring/decimal"
 	"github.com/sourcegraph/conc/iter"
@@ -21,7 +22,26 @@ func (s *LiteStorage) GetJettonWalletsByOwnerAddress(ctx context.Context, addres
 		storageTimeHistogramVec.WithLabelValues("get_jetton_wallets_by_owner").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	jettons := s.knownAccounts["jettons"]
+	
+	// Get all jetton master accounts from DB
+	var jettons []tongo.AccountID
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("jetton_master:")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		
+		for it.Rewind(); it.Valid(); it.Next() {
+			if account := parseAccountFromKey(it.Item().Key()); account != (tongo.AccountID{}) {
+				jettons = append(jettons, account)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	
 	mapper := iter.Mapper[tongo.AccountID, *core.JettonWallet]{
 		MaxGoroutines: s.maxGoroutines,
 	}
@@ -83,7 +103,7 @@ func (s *LiteStorage) GetJettonMasterMetadata(ctx context.Context, master tongo.
 		storageTimeHistogramVec.WithLabelValues("get_jetton_master_metadata").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	meta, ok := s.jettonMetaCache.Load(master.ToRaw())
+	meta, ok := s.jettonMetaCache.Get(master)
 	if ok {
 		return meta, nil
 	}
@@ -91,7 +111,7 @@ func (s *LiteStorage) GetJettonMasterMetadata(ctx context.Context, master tongo.
 	if err != nil {
 		return tongo.JettonMetadata{}, err
 	}
-	s.jettonMetaCache.Store(master.ToRaw(), rawMeta)
+	s.jettonMetaCache.Set(master, rawMeta)
 	return rawMeta, nil
 }
 

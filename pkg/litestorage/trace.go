@@ -65,7 +65,37 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
-	return nil, nil
+	return s.searchTracesInternal(ctx, a, limit, beforeLT, startTime, endTime, initiator)
+}
+
+func (s *LiteStorage) searchTracesInternal(ctx context.Context, a tongo.AccountID, limit int, beforeLT *int64, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
+	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
+		storageTimeHistogramVec.WithLabelValues("search_traces").Observe(v)
+	}))
+	defer timer.ObserveDuration()
+
+	var before, after uint64
+	if beforeLT != nil {
+		before = uint64(*beforeLT)
+	}
+	if startTime != nil {
+		after = uint64(*startTime)
+	}
+
+	txs, err := s.GetAccountTransactions(ctx, a, limit, before, after, initiator)
+	if err != nil {
+		return nil, err
+	}
+
+	traces := make([]core.TraceID, 0, len(txs))
+	for _, tx := range txs {
+		traces = append(traces, core.TraceID{
+			Hash:  tx.Hash,
+			Lt:    tx.Lt,
+			UTime: tx.Utime,
+		})
+	}
+	return traces, nil
 }
 
 func (s *LiteStorage) recursiveGetChildren(ctx context.Context, tx core.Transaction, depth int) (core.Trace, error) {
@@ -187,7 +217,7 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 }
 
 func (s *LiteStorage) getAccountInterfaces(ctx context.Context, id tongo.AccountID) ([]abi.ContractInterface, error) {
-	interfaces, ok := s.accountInterfacesCache.Load(id)
+	interfaces, ok := s.accountInterfacesCache.Get(id)
 	if ok {
 		return interfaces, nil
 	}
@@ -215,6 +245,6 @@ func (s *LiteStorage) getAccountInterfaces(ctx context.Context, id tongo.Account
 		return nil, err
 	}
 	interfaces = cd.ContractInterfaces
-	s.accountInterfacesCache.Store(id, interfaces)
+	s.accountInterfacesCache.Set(id, interfaces)
 	return interfaces, nil
 }

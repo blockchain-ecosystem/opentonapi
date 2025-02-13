@@ -16,7 +16,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/puzpuzpuz/xsync/v2"
-	"github.com/sourcegraph/conc/iter"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
@@ -111,6 +110,28 @@ func (b *BadgerStorage) StopGC() {
 	}
 }
 
+// Add new configuration types
+type StorageConfig struct {
+	MaxCacheSize      int
+	CacheTTL         time.Duration
+	MaxDBConnections int
+	DBPath           string
+	EnableFullScan    bool          // Add new field
+	WorkerPoolSize    int           // Add new field
+	CacheEvictionTime time.Duration // Add new field
+}
+
+type StorageMetrics struct {
+	dbOperations   *prometheus.CounterVec
+	dbLatency      *prometheus.HistogramVec
+	cacheHitRate   *prometheus.GaugeVec
+	dbSize         prometheus.Gauge
+	accountsCount  prometheus.Gauge
+	dbErrors      *prometheus.CounterVec
+	cacheHits     *prometheus.CounterVec
+	cacheMisses   *prometheus.CounterVec
+}
+
 type LiteStorage struct {
 	logger     *zap.Logger
 	client     *liteapi.Client
@@ -118,21 +139,18 @@ type LiteStorage struct {
 	persistent *BadgerStorage
 	
 	// Hot caches
-	jettonMetaCache         *xsync.MapOf[string, tep64.Metadata]
+	jettonMetaCache         cache.Cache[tongo.AccountID, tep64.Metadata]
 	transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
 	transactionsByInMsgLT   *xsync.MapOf[inMsgCreatedLT, tongo.Bits256]
 	blockCache              *xsync.MapOf[tongo.BlockIDExt, *tlb.Block]
-	accountInterfacesCache  *xsync.MapOf[tongo.AccountID, []abi.ContractInterface]
+	accountInterfacesCache  cache.Cache[tongo.AccountID, []abi.ContractInterface]
 	// tvmLibraryCache contains public tvm libraries.
 	// As a library is immutable, it's ok to cache it.
 	tvmLibraryCache        cache.Cache[string, boc.Cell]
 	configCache            cache.Cache[int, ton.BlockchainConfig]
 	
-	knownAccounts      map[string][]tongo.AccountID
 	// maxGoroutines specifies a number of goroutines used to perform some time-consuming operations.
 	maxGoroutines      int
-	 // trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
-	trackingAccounts   map[tongo.AccountID]struct{}
 	pubKeyByAccountID  *xsync.MapOf[tongo.AccountID, ed25519.PublicKey]
 	
 	stopCh chan struct{}
@@ -142,7 +160,23 @@ type LiteStorage struct {
 	// it's performance optimization.
 	// tmv and txEmulator work much faster with a smaller config.
 	trimmedConfigBase64 string
+	config *StorageConfig  // Change from anonymous struct to StorageConfig pointer
+	
+	// Add metrics for monitoring
+	metrics struct {
+		accountsProcessed    prometheus.Counter
+		cacheHitRate        prometheus.Gauge
+		cacheSize           prometheus.Gauge
+		processingLatency   prometheus.Histogram
+		dbLatency          *prometheus.HistogramVec
+		dbOperations       *prometheus.CounterVec
+	}
+	db *badger.DB
+	wg sync.WaitGroup
 }
+
+// Option configures LiteStorage
+type Option func(o *Options)
 
 type Options struct {
 	preloadAccounts []tongo.AccountID
@@ -153,6 +187,7 @@ type Options struct {
 	// blockCh is used to receive new blocks in the blockchain, if set.
 	blockCh <-chan indexer.IDandBlock
 	MaxGoroutines int // number of concurrent goroutines for transaction processing
+	config StorageConfig
 }
 
 func WithPreloadAccounts(a []tongo.AccountID) Option {
@@ -186,81 +221,82 @@ func WithBlockChannel(ch <-chan indexer.IDandBlock) Option {
 	}
 }
 
-type Option func(o *Options)
+// Add configuration option
+func WithStorageConfig(config StorageConfig) Option {
+	return func(o *Options) {
+		o.config = config
+	}
+}
 
-func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*LiteStorage, error) {
-	// Initialize BadgerDB
-	badgerOpts := badger.DefaultOptions("./data/badger")
-	badgerOpts.ValueLogFileSize = 1 << 30 // 1GB
-	db, err := badger.Open(badgerOpts)
+// Initialize metrics
+func initStorageMetrics() *StorageMetrics {
+	return &StorageMetrics{
+		dbOperations: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "badger_operations_total",
+				Help: "Number of BadgerDB operations",
+			},
+			[]string{"operation", "status"},
+		),
+		// ... initialize other metrics
+	}
+}
+
+func NewLiteStorage(logger *zap.Logger, client *liteapi.Client, opts ...Option) (*LiteStorage, error) {
+	config := &StorageConfig{
+		DBPath: "/tmp/badger",  // Default path
+		MaxCacheSize: 1000000,
+		CacheTTL: time.Hour,
+	}
+	
+	// Open BadgerDB
+	dbOpts := badger.DefaultOptions(config.DBPath)
+	db, err := badger.Open(dbOpts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open badger: %w", err)
-	}
-	
-	persistent := &BadgerStorage{
-		db:               db,
-		transactionCache: cache.NewLRUCache[tongo.Bits256, *core.Transaction](10000, "transactions"),
-		blockCache:       cache.NewLRUCache[tongo.BlockIDExt, *tlb.Block](1000, "blocks"),
-	}
-	
-	o := &Options{}
-	for i := range opts {
-		opts[i](o)
-	}
-	if o.executor == nil {
-		o.executor = cli
-	}
-	if o.MaxGoroutines <= 0 {
-		o.MaxGoroutines = 100 // default value
-	}
-	storage := &LiteStorage{
-		logger: log,
-		// TODO: introduce an env variable to configure this number
-		maxGoroutines: o.MaxGoroutines,
-		client:        cli,
-		executor:      o.executor,
-		stopCh:        make(chan struct{}),
-		// read-only data
-		knownAccounts:    make(map[string][]tongo.AccountID),
-		trackingAccounts: map[tongo.AccountID]struct{}{},
-		// data for concurrent access
-		// TODO: implement expiration logic for the caches below.
-		jettonMetaCache:         xsync.NewMapOf[tep64.Metadata](),
-		transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
-		transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
-		blockCache:              xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
-		accountInterfacesCache:  xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
-		pubKeyByAccountID:       xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
-		tvmLibraryCache:         cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
-		configCache:             cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
-		persistent:              persistent,
-	}
-	storage.knownAccounts["tf_pools"] = o.tfPools
-	storage.knownAccounts["jettons"] = o.jettons
-
-	for _, a := range o.preloadAccounts {
-		storage.trackingAccounts[a] = struct{}{}
+		return nil, fmt.Errorf("failed to open BadgerDB: %w", err)
 	}
 
-	blockIterator := iter.Iterator[tongo.BlockID]{MaxGoroutines: storage.maxGoroutines}
-	blockIterator.ForEach(o.preloadBlocks, func(id *tongo.BlockID) {
-		if err := storage.preloadBlock(*id); err != nil {
-			log.Error("failed to preload block",
-				zap.String("blockID", id.String()),
-				zap.Error(err))
+	s := &LiteStorage{
+		logger: logger,
+		client: client,
+		config: config,
+		metrics: struct {
+			accountsProcessed    prometheus.Counter
+			cacheHitRate        prometheus.Gauge
+			cacheSize           prometheus.Gauge
+			processingLatency   prometheus.Histogram
+			dbLatency          *prometheus.HistogramVec
+			dbOperations       *prometheus.CounterVec
+		}{
+			dbLatency: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name: "litestorage_db_operation_latency",
+					Help: "Database operation latency in seconds",
+				},
+				[]string{"operation"},
+			),
+			dbOperations: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "litestorage_db_operations_total",
+					Help: "Total number of database operations",
+				},
+				[]string{"operation", "status"},
+			),
+		},
+		db: db,
+	}
+	
+	// Initialize scanner if full scan is enabled
+	if s.config.EnableFullScan {
+		scanner := &AccountScanner{
+			storage: s,
+			logger:  logger,
+			workers: make(chan struct{}, s.config.WorkerPoolSize),
 		}
-	})
-	iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: storage.maxGoroutines}
-	iterator.ForEach(o.preloadAccounts, func(accountID *tongo.AccountID) {
-		if err := storage.preloadAccount(*accountID); err != nil {
-			log.Error("failed to preload account",
-				zap.String("accountID", accountID.String()),
-				zap.Error(err))
-		}
-	})
-	go storage.run(o.blockCh)
-	go storage.runBlockchainConfigUpdate(5 * time.Second)
-	return storage, nil
+		scanner.Start(context.Background())
+	}
+	
+	return s, nil
 }
 
 func (s *LiteStorage) SetExecutor(e abi.Executor) {
@@ -276,23 +312,23 @@ func (s *LiteStorage) Shutdown() {
 }
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
-	// Create a buffered worker pool to handle concurrent processing
 	workers := make(chan struct{}, s.maxGoroutines)
 	
 	for idAndBlock := range ch {
-		// Copy values to prevent race conditions in the goroutine
 		block := idAndBlock.Block
 		blockID := idAndBlock.ID
 		
-		// Get accounts snapshot to prevent map iteration race
-		s.mu.RLock()
-		accounts := make([]tongo.AccountID, 0, len(s.trackingAccounts))
-		for accountID := range s.trackingAccounts {
+		// Process all accounts from transactions in the block
+		accounts := make([]tongo.AccountID, 0)
+		for _, tx := range block.AllTransactions() {
+			accountID := tongo.AccountID{
+				Workchain: blockID.Workchain,
+				Address:   tx.AccountAddr,
+			}
 			accounts = append(accounts, accountID)
 		}
-		s.mu.RUnlock()
 
-		// Process each account concurrently but with controlled parallelism
+		// Process each account concurrently
 		for _, accountID := range accounts {
 			workers <- struct{}{} // Acquire worker slot
 			go func(accID tongo.AccountID) {
@@ -782,4 +818,67 @@ func (b *BadgerStorage) BatchSetTransactions(txs []*core.Transaction) error {
 	}
 	
 	return batch.Flush()
+}
+
+// Example usage in other methods
+func (s *LiteStorage) SaveTransaction(tx *core.Transaction) error {
+	key := makeTransactionKey(tx.Hash)
+	value, err := json.Marshal(tx)
+	if err != nil {
+		return err
+	}
+	return s.Set(key, value)
+}
+
+func makeTransactionKey(hash tongo.Bits256) []byte {
+	return []byte(prefixTx + hash.Hex())
+}
+
+// Process all accounts from BadgerDB
+func (s *LiteStorage) ProcessAllAccounts(ctx context.Context, fn func(accountID tongo.AccountID) error) error {
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = []byte("account:")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				account := parseAccountFromKey(it.Item().Key())
+				if account == (tongo.AccountID{}) {
+					continue
+				}
+				if err := fn(account); err != nil {
+					return fmt.Errorf("process account %s: %w", account, err)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("process all accounts: %w", err)
+	}
+	return nil
+}
+
+
+func (s *LiteStorage) clearCaches() {
+	// Clear all keys from caches
+	for _, key := range s.jettonMetaCache.Keys() {
+		s.jettonMetaCache.Delete(key)
+	}
+	for _, key := range s.accountInterfacesCache.Keys() {
+		s.accountInterfacesCache.Delete(key)
+	}
+	for _, key := range s.tvmLibraryCache.Keys() {
+		s.tvmLibraryCache.Delete(key)
+	}
+	for _, key := range s.configCache.Keys() {
+		s.configCache.Delete(key)
+	}
+	
+	s.metrics.dbOperations.WithLabelValues("cache", "clear").Inc()
 }
