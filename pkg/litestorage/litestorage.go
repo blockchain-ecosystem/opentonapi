@@ -145,9 +145,9 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		o.executor = cli
 	}
 
-	db, err := NewBadgerDBStorage("./badger")
+	db, err := badger.Open(badger.DefaultOptions("./badger"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open badger: %w", err)
 	}
 
 	storage := &LiteStorage{
@@ -170,7 +170,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		pubKeyByAccountID:      xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
 		tvmLibraryCache:        cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:            cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
-		db:                     db.db,
+		db:                     db,
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons

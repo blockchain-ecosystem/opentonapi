@@ -27,6 +27,12 @@ var (
 )
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+	if s == nil {
+		return nil, fmt.Errorf("storage is nil")
+	}
+	if s.db == nil {
+		return nil, fmt.Errorf("database is not initialized")
+	}
 	if s.client == nil {
 		return nil, fmt.Errorf("lite client not initialized")
 	}
