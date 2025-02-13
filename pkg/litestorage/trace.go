@@ -26,42 +26,21 @@ var (
 	}, []string{"code_hash"})
 )
 
-func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
-	}))
-	defer timer.ObserveDuration()
-
-	var trace *core.Trace
-	err := retry.Do(
-		func() error {
-			tx, err := s.GetTransaction(ctx, hash)
-			if err != nil {
-				return err
-			}
-			
-			root, err := s.findRoot(ctx, tx, 0)
-			if err != nil {
-				return err
-			}
-			
-			t, err := s.recursiveGetChildren(ctx, *root, 0)
-			if err != nil {
-				return err
-			}
-			trace = &t
-			return nil
-		},
-		retry.Attempts(3),
-		retry.Delay(500*time.Millisecond),
-		retry.DelayType(retry.BackOffDelay),
-	)
+func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+	var tx *core.Transaction
+	err := retry.Do(func() error {
+		var err error
+		tx, err = s.GetTransaction(ctx, hash)
+		if err != nil {
+			return err
+		}
+		return nil
+	}, retry.Attempts(3))
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get trace: %w", err)
 	}
-	
-	return trace, nil
+	return tx, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
