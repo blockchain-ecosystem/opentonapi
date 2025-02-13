@@ -26,21 +26,19 @@ var (
 	}, []string{"code_hash"})
 )
 
-func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	var tx *core.Transaction
-	err := retry.Do(func() error {
-		var err error
-		tx, err = s.GetTransaction(ctx, hash)
-		if err != nil {
-			return err
-		}
-		return nil
-	}, retry.Attempts(3))
-
+func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get trace: %w", err)
 	}
-	return tx, nil
+	
+	// Convert Transaction to Trace
+	trace := &core.Trace{
+		Transaction: *tx,
+		Children:    make([]*core.Trace, 0),
+	}
+	
+	return trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
