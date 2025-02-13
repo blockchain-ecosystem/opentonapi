@@ -52,7 +52,7 @@ func extractInMsgCreatedLT(accountID tongo.AccountID, tx *tlb.Transaction) (inMs
 }
 
 type CacheOptions struct {
-	TTL time.Duration
+	TTL     time.Duration
 	MaxSize int
 }
 
@@ -71,8 +71,8 @@ type LiteStorage struct {
 	knownAccounts   map[string][]tongo.AccountID
 	// maxGoroutines specifies a number of goroutines used to perform some time-consuming operations.
 	maxGoroutines int
-	// trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
-	trackingAccounts  map[tongo.AccountID]struct{}
+	// // trackingAccounts is a list of accounts we track. Defined with ACCOUNTS env variable.
+	// trackingAccounts  map[tongo.AccountID]struct{}
 	pubKeyByAccountID *xsync.MapOf[tongo.AccountID, ed25519.PublicKey]
 	configCache       cache.Cache[int, ton.BlockchainConfig]
 
@@ -83,6 +83,7 @@ type LiteStorage struct {
 	// it's performance optimization.
 	// tmv and txEmulator work much faster with a smaller config.
 	trimmedConfigBase64 string
+	db                  *BadgerDBStorage
 }
 
 type Options struct {
@@ -136,6 +137,12 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 	if o.executor == nil {
 		o.executor = cli
 	}
+
+	db, err := NewBadgerDBStorage("./badger")
+	if err != nil {
+		return nil, err
+	}
+
 	storage := &LiteStorage{
 		logger: log,
 		// TODO: introduce an env variable to configure this number
@@ -144,8 +151,8 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 		executor:      o.executor,
 		stopCh:        make(chan struct{}),
 		// read-only data
-		knownAccounts:    make(map[string][]tongo.AccountID),
-		trackingAccounts: map[tongo.AccountID]struct{}{},
+		knownAccounts: make(map[string][]tongo.AccountID),
+		// trackingAccounts: map[tongo.AccountID]struct{}{},
 		// data for concurrent access
 		// TODO: implement expiration logic for the caches below.
 		jettonMetaCache:         xsync.NewMapOf[tep64.Metadata](),
@@ -156,13 +163,14 @@ func NewLiteStorage(log *zap.Logger, cli *liteapi.Client, opts ...Option) (*Lite
 		pubKeyByAccountID:       xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
 		tvmLibraryCache:         cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:             cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
+		db:                      db,
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons
 
-	for _, a := range o.preloadAccounts {
-		storage.trackingAccounts[a] = struct{}{}
-	}
+	// for _, a := range o.preloadAccounts {
+	// 	storage.trackingAccounts[a] = struct{}{}
+	// }
 
 	blockIterator := iter.Iterator[tongo.BlockID]{MaxGoroutines: storage.maxGoroutines}
 	blockIterator.ForEach(o.preloadBlocks, func(id *tongo.BlockID) {
@@ -201,6 +209,7 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	for block := range ch {
 		for _, tx := range block.Block.AllTransactions() {
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
+			// if _, ok := s.trackingAccounts[accountID]; ok {
 			hash := tongo.Bits256(tx.Hash())
 			transaction, err := core.ConvertTransaction(accountID.Workchain, tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
 			if err != nil {
@@ -210,9 +219,14 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 				continue
 			}
 			s.transactionsIndexByHash.Store(hash, transaction)
-			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+			createLT, ok := extractInMsgCreatedLT(accountID, tx)
+			if ok {
 				s.transactionsByInMsgLT.Store(createLT, hash)
 			}
+			fmt.Printf("tx: %s\n", hash.Hex())
+			fmt.Printf("createLT: %v\n", createLT)
+			fmt.Printf("ok: %v\n", ok)
+			// }
 		}
 	}
 }
@@ -302,7 +316,8 @@ func (s *LiteStorage) preloadAccount(a tongo.AccountID) error {
 		}
 		hash := tongo.Bits256(tx.Hash())
 		s.transactionsIndexByHash.Store(hash, t)
-		if createLT, ok := extractInMsgCreatedLT(a, &tx.Transaction); ok {
+		createLT, ok := extractInMsgCreatedLT(a, &tx.Transaction)
+		if ok {
 			s.transactionsByInMsgLT.Store(createLT, hash)
 		}
 	}
@@ -337,7 +352,8 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 		}
 		hash := tongo.Bits256(tx.Hash())
 		s.transactionsIndexByHash.Store(hash, t)
-		if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+		createLT, ok := extractInMsgCreatedLT(accountID, tx)
+		if ok {
 			s.transactionsByInMsgLT.Store(createLT, hash)
 		}
 	}

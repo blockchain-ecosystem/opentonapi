@@ -22,10 +22,10 @@ func TestLiteStorage_run(t *testing.T) {
 	require.Nil(t, err)
 
 	tests := []struct {
-		name             string
-		blockID          tongo.BlockIDExt
-		trackingAccounts map[tongo.AccountID]struct{}
-		wantTxHashes     map[string]struct{}
+		name    string
+		blockID tongo.BlockIDExt
+		// trackingAccounts map[tongo.AccountID]struct{}
+		wantTxHashes map[string]struct{}
 	}{
 		{
 			blockID: tongo.BlockIDExt{
@@ -37,9 +37,9 @@ func TestLiteStorage_run(t *testing.T) {
 				RootHash: tongo.MustParseHash("uUXAYuzYEVp1M9PLmMh+PoaQRiw0IF4Pfc8YKoYO4GU="),
 				FileHash: tongo.MustParseHash("sthyyo2Y3sQubE+hhx7MOQ0YQ+d2z4x/gkvaAq7jN1A="),
 			},
-			trackingAccounts: map[tongo.AccountID]struct{}{
-				tongo.MustParseAccountID("0:6ccd325a858c379693fae2bcaab1c2906831a4e10a6c3bb44ee8b615bca1d220"): {},
-			},
+			// trackingAccounts: map[tongo.AccountID]struct{}{
+			// 	tongo.MustParseAccountID("0:6ccd325a858c379693fae2bcaab1c2906831a4e10a6c3bb44ee8b615bca1d220"): {},
+			// },
 			wantTxHashes: map[string]struct{}{
 				"9d224d8b784736019cbf334c38374c7448962b484a1759af8898730c80ecdaac": {},
 			},
@@ -51,7 +51,7 @@ func TestLiteStorage_run(t *testing.T) {
 				logger:                  zap.L(),
 				transactionsIndexByHash: xsync.NewTypedMapOf[tongo.Bits256, *core.Transaction](hashBits256),
 				transactionsByInMsgLT:   xsync.NewTypedMapOf[inMsgCreatedLT, tongo.Bits256](hashInMsgCreatedLT),
-				trackingAccounts:        tt.trackingAccounts,
+				// trackingAccounts:        tt.trackingAccounts,
 			}
 			ch := make(chan indexer.IDandBlock)
 			go s.run(ch)
