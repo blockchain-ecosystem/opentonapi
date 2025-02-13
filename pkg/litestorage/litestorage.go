@@ -229,7 +229,7 @@ func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, err
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			fmt.Println("Raw JSON Data:", string(val))
+			// fmt.Println("Raw JSON Data:", string(val))
 			errData := json.Unmarshal(val, &tx)
 			if errData != nil {
 				fmt.Println("JSON Unmarshal Error:", errData)
