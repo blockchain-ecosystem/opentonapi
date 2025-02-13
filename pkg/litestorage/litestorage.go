@@ -533,21 +533,22 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 }
 
 func (s *LiteStorage) GetBlockHeader(ctx context.Context, id tongo.BlockID) (*core.BlockHeader, error) {
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_block_header").Observe(v)
-	}))
-	defer timer.ObserveDuration()
-	blockID, _, err := s.client.LookupBlock(ctx, id, 1, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	block, err := s.client.GetBlock(ctx, blockID)
-	if err != nil {
-		return nil, err
-	}
-
-	s.blockCache.Store(blockID, &block)
-	header, err := core.ConvertToBlockHeader(blockID, &block)
+	var header *core.BlockHeader
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := append([]byte(prefixBlock), []byte(id.String())...)
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return fmt.Errorf("block not found: %v", id)
+		}
+		if err != nil {
+			return fmt.Errorf("get block: %w", err)
+		}
+		
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &header)
+		})
+	})
+	
 	if err != nil {
 		return nil, err
 	}
