@@ -38,40 +38,57 @@ type IDandBlock struct {
 }
 
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
+	rateLimiter := time.NewTicker(200 * time.Millisecond)
+	defer rateLimiter.Stop()
+
 	var chunk *chunk
 	for {
-		time.Sleep(200 * time.Millisecond)
-		info, err := idx.cli.GetMasterchainInfo(ctx)
-		if err != nil {
-			idx.logger.Error("failed to get masterchain info", zap.Error(err))
-			continue
-		}
-		chunk, err = idx.initChunk(info.Last.Seqno)
-		if err != nil {
-			idx.logger.Error("failed to get init chunk", zap.Error(err))
-			continue
-		}
-		break
-	}
-
-	for {
-		time.Sleep(500 * time.Millisecond)
-		next, err := idx.next(chunk)
-		if err != nil {
-			if isBlockNotReadyError(err) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-rateLimiter.C:
+			info, err := idx.cli.GetMasterchainInfo(ctx)
+			if err != nil {
+				idx.logger.Error("failed to get masterchain info", zap.Error(err))
 				continue
 			}
-			idx.logger.Error("failed to get next chunk", zap.Error(err))
-			continue
-		}
-		for _, block := range next.blocks {
-			for _, ch := range channels {
-				ch <- block
+			chunk, err = idx.initChunk(info.Last.Seqno)
+			if err != nil {
+				idx.logger.Error("failed to get init chunk", zap.Error(err))
+				continue
 			}
+			break
 		}
-		chunk = next
 	}
 
+	blockTicker := time.NewTicker(500 * time.Millisecond)
+	defer blockTicker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-blockTicker.C:
+			next, err := idx.next(chunk)
+			if err != nil {
+				if isBlockNotReadyError(err) {
+					continue
+				}
+				idx.logger.Error("failed to get next chunk", zap.Error(err))
+				continue
+			}
+			for _, block := range next.blocks {
+				for _, ch := range channels {
+					select {
+					case ch <- block:
+					default:
+						idx.logger.Warn("channel full, skipping block")
+					}
+				}
+			}
+			chunk = next
+		}
+	}
 }
 
 func (idx *Indexer) next(prevChunk *chunk) (*chunk, error) {

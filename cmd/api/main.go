@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tonkeeper/opentonapi/pkg/addressbook"
@@ -21,6 +24,16 @@ import (
 )
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Setup signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
 
 	cfg := config.Load()
 	log := app.Logger(cfg.App.LogLevel)
@@ -54,7 +67,7 @@ func main() {
 	}
 	// mempool receives a copy of any payload that goes through our API method /v2/blockchain/message
 	mempool := sources.NewMemPool(log)
-	mempoolCh := mempool.Run(context.TODO())
+	mempoolCh := mempool.Run(ctx)
 
 	msgSender, err := blockchain.NewMsgSender(log, cfg.App.LiteServers, map[string]chan<- blockchain.ExtInMsgCopy{
 		"mempool": mempoolCh,
@@ -75,13 +88,13 @@ func main() {
 		log.Fatal("failed to create api handler", zap.Error(err))
 	}
 	source := sources.NewBlockchainSource(log, client)
-	pusherBlockCh := source.Run(context.TODO())
+	pusherBlockCh := source.Run(ctx)
 
 	tracer := sources.NewTracer(log, storage, source)
-	go tracer.Run(context.TODO())
+	go tracer.Run(ctx)
 
 	idx := indexer.New(log, client)
-	go idx.Run(context.TODO(), []chan indexer.IDandBlock{
+	go idx.Run(ctx, []chan indexer.IDandBlock{
 		pusherBlockCh,
 		storageBlockCh,
 	})

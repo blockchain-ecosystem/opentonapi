@@ -60,16 +60,36 @@ func (b *BlockchainSource) SubscribeToBlockHeaders(ctx context.Context, delivery
 }
 
 func msgOpCodeAndName(msg tlb.Message, cell *boc.Cell) (opCode *uint32, opName *abi.MsgOpName) {
+	// Add safety checks
+	if cell == nil || cell.BitSize() == 0 {
+		return nil, nil
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			return
+		}
+	}()
+
 	if msg.Info.IntMsgInfo != nil {
-		tag, name, _, _ := abi.InternalMessageDecoder(cell, nil)
+		tag, name, _, err := abi.InternalMessageDecoder(cell, nil)
+		if err != nil {
+			return nil, nil
+		}
 		return tag, name
 	}
 	if msg.Info.ExtInMsgInfo != nil {
-		tag, name, _, _ := abi.ExtInMessageDecoder(cell, nil)
+		tag, name, _, err := abi.ExtInMessageDecoder(cell, nil)
+		if err != nil {
+			return nil, nil
+		}
 		return tag, name
 	}
 	if msg.Info.ExtOutMsgInfo != nil {
-		tag, name, _, _ := abi.ExtOutMessageDecoder(cell, nil, msg.Info.ExtOutMsgInfo.Dest)
+		tag, name, _, err := abi.ExtOutMessageDecoder(cell, nil, msg.Info.ExtOutMsgInfo.Dest)
+		if err != nil {
+			return nil, nil
+		}
 		return tag, name
 	}
 	return nil, nil

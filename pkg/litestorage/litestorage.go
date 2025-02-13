@@ -87,6 +87,8 @@ type LiteStorage struct {
 	// tmv and txEmulator work much faster with a smaller config.
 	trimmedConfigBase64 string
 	db                  *badger.DB
+	connPool            sync.Pool
+	maxConns            int
 }
 
 type Options struct {
@@ -171,6 +173,12 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		tvmLibraryCache:        cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
 		configCache:            cache.NewLRUCache[int, ton.BlockchainConfig](4, "config"),
 		db:                     db,
+		maxConns:               50, // Configurable max connections
+		connPool: sync.Pool{
+			New: func() interface{} {
+				return &liteapi.Client{}
+			},
+		},
 	}
 	storage.knownAccounts["tf_pools"] = o.tfPools
 	storage.knownAccounts["jettons"] = o.jettons
@@ -652,4 +660,11 @@ func (s *LiteStorage) GetAccountMultisigs(ctx context.Context, accountID ton.Acc
 
 func (s *LiteStorage) GetMultisigByID(ctx context.Context, accountID ton.AccountID) (*core.Multisig, error) {
 	return nil, fmt.Errorf("not implemented")
+}
+
+func (s *LiteStorage) getConnection() (*liteapi.Client, func()) {
+	conn := s.connPool.Get().(*liteapi.Client)
+	return conn, func() {
+		s.connPool.Put(conn)
+	}
 }
