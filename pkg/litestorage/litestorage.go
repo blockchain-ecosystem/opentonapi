@@ -558,20 +558,26 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Debug("getting transaction from BadgerDB", zap.String("hash", hash.Hex()))
+	s.logger.Info("getting transaction from BadgerDB", zap.String("hash", hash.Hex()))
+
+	// Try memory cache first
+	if tx, ok := s.transactionsIndexByHash.Load(hash); ok {
+		s.logger.Info("transaction found in memory cache", 
+			zap.String("hash", hash.Hex()))
+		return tx, nil
+	}
 
 	var tx core.Transaction
 	err := s.db.View(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), []byte(hash.Hex())...)
-		s.logger.Debug("searching in BadgerDB", zap.String("key", string(key)))
+		key := makeTransactionKey(hash)
+		s.logger.Info("searching in BadgerDB", zap.String("key", string(key)), zap.String("hash", hash.Hex()))
 		
 		item, err := txn.Get(key)
 		if err == badger.ErrKeyNotFound {
-			s.logger.Debug("transaction not found in BadgerDB", zap.String("hash", hash.Hex()))
+			s.logger.Info("transaction not found in BadgerDB", zap.String("hash", hash.Hex()))
 			return core.ErrEntityNotFound
 		}
 		if err != nil {
-			s.logger.Error("BadgerDB error", zap.Error(err))
 			return fmt.Errorf("get transaction: %w", err)
 		}
 		
@@ -581,13 +587,15 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	})
 
 	if err != nil {
-		s.logger.Error("failed to get transaction", 
-			zap.String("hash", hash.Hex()),
-			zap.Error(err))
+		if err != core.ErrEntityNotFound {
+			s.logger.Error("failed to get transaction", 
+				zap.String("hash", hash.Hex()),
+				zap.Error(err))
+		}
 		return nil, err
 	}
 
-	s.logger.Debug("transaction found in BadgerDB", zap.String("hash", hash.Hex()))
+	s.logger.Info("transaction found in BadgerDB", zap.String("hash", hash.Hex()))
 	return &tx, nil
 }
 
