@@ -41,7 +41,10 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 	rateLimiter := time.NewTicker(200 * time.Millisecond)
 	defer rateLimiter.Stop()
 
-	var chunk *chunk
+	// Add backoff for retries
+	backoff := time.Second
+	maxBackoff := time.Minute
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -50,17 +53,26 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 			info, err := idx.cli.GetMasterchainInfo(ctx)
 			if err != nil {
 				idx.logger.Error("failed to get masterchain info", zap.Error(err))
+				time.Sleep(backoff)
+				backoff = min(backoff*2, maxBackoff)
 				continue
 			}
-			chunk, err = idx.initChunk(info.Last.Seqno)
+
+			chunk, err := idx.initChunk(info.Last.Seqno)
 			if err != nil {
 				idx.logger.Error("failed to get init chunk", zap.Error(err))
+				time.Sleep(backoff)
 				continue
 			}
-			break
+
+			// If we successfully get here, start processing blocks
+			idx.processBlocks(ctx, chunk, channels)
+			return
 		}
 	}
+}
 
+func (idx *Indexer) processBlocks(ctx context.Context, chunk *chunk, channels []chan IDandBlock) {
 	blockTicker := time.NewTicker(500 * time.Millisecond)
 	defer blockTicker.Stop()
 
@@ -77,10 +89,13 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				idx.logger.Error("failed to get next chunk", zap.Error(err))
 				continue
 			}
+
 			for _, block := range next.blocks {
 				for _, ch := range channels {
 					select {
 					case ch <- block:
+					case <-ctx.Done():
+						return
 					default:
 						idx.logger.Warn("channel full, skipping block")
 					}

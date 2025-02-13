@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tonkeeper/opentonapi/pkg/addressbook"
@@ -89,6 +90,27 @@ func main() {
 	}
 	source := sources.NewBlockchainSource(log, client)
 	pusherBlockCh := source.Run(ctx)
+
+	// Add readiness check here
+	ready := make(chan struct{})
+	go func() {
+		for i := 0; i < 30; i++ { // 30 second timeout
+			if _, err := client.GetMasterchainInfo(ctx); err == nil {
+				close(ready)
+				return
+			}
+			time.Sleep(time.Second)
+			log.Warn("waiting for blockchain connection...", zap.Int("attempt", i+1))
+		}
+		log.Fatal("failed to initialize connection to blockchain")
+	}()
+
+	select {
+	case <-ready:
+		log.Info("service initialized successfully")
+	case <-ctx.Done():
+		log.Fatal("initialization cancelled")
+	}
 
 	tracer := sources.NewTracer(log, storage, source)
 	go tracer.Run(ctx)

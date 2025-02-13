@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/go-faster/errors"
+	"github.com/labstack/echo/v4"
 	"github.com/tonkeeper/opentonapi/pkg/chainstate"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 	"github.com/tonkeeper/opentonapi/pkg/rates"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
+	"github.com/tonkeeper/tongo/liteapi"
 )
 
 // Compile-time check for Handler.
@@ -65,6 +68,7 @@ type Handler struct {
 	mu         sync.Mutex
 	dns        *dns.DNS // todo: update when blockchain config changes
 	configPool *sync.Pool
+	client     *liteapi.Client
 }
 
 func (h *Handler) NewError(ctx context.Context, err error) *oas.ErrorStatusCode {
@@ -258,4 +262,15 @@ func (h *Handler) GetJettonNormalizedMetadata(ctx context.Context, master tongo.
 		return NormalizeMetadata(meta, &info, core.TrustNone)
 	}
 	return NormalizeMetadata(meta, nil, h.spamFilter.JettonTrust(master, meta.Symbol, meta.Name, meta.Image))
+}
+
+func (h *Handler) HealthCheck(c echo.Context) error {
+	info, err := h.client.GetMasterchainInfo(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "service not ready")
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"status":     "ok",
+		"last_block": info.Last.Seqno,
+	})
 }
