@@ -234,6 +234,9 @@ func (s *LiteStorage) Shutdown() {
 }
 
 func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction) error {
+	s.logger.Debug("storing transaction",
+		zap.String("hash", hash.Hex()))
+
 	if tx == nil {
 		return fmt.Errorf("nil transaction")
 	}
@@ -241,21 +244,15 @@ func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction)
 	s.txMutex.Lock()
 	defer s.txMutex.Unlock()
 
-	// Store in DB with retry mechanism
-	return retry.Do(
-		func() error {
-			key := append([]byte("tx:"), hash[:]...)
-			return s.db.Update(func(txn *badger.Txn) error {
-				data, err := json.Marshal(tx)
-				if err != nil {
-					return err
-				}
-				return txn.Set(key, data)
-			})
-		},
-		retry.Attempts(3),
-		retry.Delay(100*time.Millisecond),
-	)
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		key := append([]byte("tx:"), hash[:]...)
+		return txn.Set(key, data)
+	})
 }
 
 func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, error) {
@@ -316,6 +313,10 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 			continue
 		}
 
+		s.logger.Info("processing block",
+			zap.String("block_id", block.ID.String()),
+			zap.Int("tx_count", len(block.Block.AllTransactions())))
+
 		for _, tx := range block.Block.AllTransactions() {
 			if tx == nil {
 				s.logger.Error("nil transaction in block",
@@ -325,6 +326,11 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
 			hash := tongo.Bits256(tx.Hash())
+
+			s.logger.Debug("processing transaction",
+				zap.String("block_id", block.ID.String()),
+				zap.String("tx_hash", hash.Hex()),
+				zap.String("account", accountID.String()))
 
 			// Use safe conversion
 			transaction, err := safeConvertTransaction(block.ID.Workchain,
@@ -570,6 +576,9 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err != nil {
+		s.logger.Error("failed to get transaction",
+			zap.String("hash", hash.Hex()),
+			zap.Error(err))
 		return nil, fmt.Errorf("not found tx %x", hash)
 	}
 	return tx, nil
