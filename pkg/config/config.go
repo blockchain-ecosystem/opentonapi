@@ -5,6 +5,7 @@ import (
 	"log"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/caarlos0/env/v6"
 	"github.com/tonkeeper/tongo"
@@ -26,6 +27,11 @@ type Config struct {
 	}
 	TonConnect struct {
 		Secret string `env:"TON_CONNECT_SECRET"`
+	}
+	Storage struct {
+		BlockRetentionCount int           `env:"BLOCK_RETENTION_COUNT" envDefault:"1000"`
+		BlockRetryCount     int           `env:"BLOCK_RETRY_COUNT" envDefault:"3"`
+		BlockRetryDelay     time.Duration `env:"BLOCK_RETRY_DELAY" envDefault:"100ms"`
 	}
 }
 

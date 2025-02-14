@@ -26,6 +26,8 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
+	"hash/maphash"
+
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
@@ -92,6 +94,9 @@ type LiteStorage struct {
 	maxConns            int
 	timeout             time.Duration
 	txMutex             sync.RWMutex
+	blockMutex          sync.RWMutex
+	blockRetryCount     int
+	blockRetryDelay     time.Duration
 }
 
 type Options struct {
@@ -179,7 +184,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		executor:               o.executor,
 		stopCh:                 make(chan struct{}),
 		knownAccounts:          make(map[string][]tongo.AccountID),
-		jettonMetaCache:        xsync.NewMapOf[tep64.Metadata](),
+		jettonMetaCache:        xsync.NewTypedMapOf[string, tep64.Metadata](hashString),
 		blockCache:             xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
 		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
 		pubKeyByAccountID:      xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
@@ -193,6 +198,8 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 				return cli // Just return the original client
 			},
 		},
+		blockRetryCount: 3,
+		blockRetryDelay: 100 * time.Millisecond,
 	}
 	s.knownAccounts["tf_pools"] = o.tfPools
 	s.knownAccounts["jettons"] = o.jettons
@@ -783,4 +790,11 @@ func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Tra
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 	)
+}
+
+func hashString(seed maphash.Seed, s string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(seed)
+	h.WriteString(s)
+	return h.Sum64()
 }

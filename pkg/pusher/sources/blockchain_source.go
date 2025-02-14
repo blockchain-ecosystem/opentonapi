@@ -95,7 +95,11 @@ func msgOpCodeAndName(msg tlb.Message, cell *boc.Cell) (opCode *uint32, opName *
 	return nil, nil
 }
 
-func (b *BlockchainSource) Run(ctx context.Context, newBlockCh chan indexer.IDandBlock) {
+func (b *BlockchainSource) Run(ctx context.Context, blockCh chan indexer.IDandBlock) {
+	go b.run(ctx, blockCh)
+}
+
+func (b *BlockchainSource) run(ctx context.Context, newBlockCh chan indexer.IDandBlock) {
 	go func() {
 		ch := b.txDispatcher.Run(ctx)
 		blockCh := b.blockDispatcher.Run(ctx)

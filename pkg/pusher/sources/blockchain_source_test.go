@@ -128,7 +128,8 @@ func TestBlockchainSource_Run(t *testing.T) {
 				txDispatcher:    mockDisp,
 				blockDispatcher: blockDisp,
 			}
-			blockCh := b.Run(context.Background())
+			blockCh := make(chan indexer.IDandBlock, 1000)
+			b.Run(context.Background(), blockCh)
 			extID, _, err := cli.LookupBlock(context.Background(), blockID, 1, nil, nil)
 			require.Nil(t, err)
 			block, err := cli.GetBlock(context.Background(), extID)

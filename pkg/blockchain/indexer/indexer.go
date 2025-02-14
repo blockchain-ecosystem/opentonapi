@@ -134,6 +134,39 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 		}
 		break
 	}
+
+	lastSeqno := chunk.masterID.Seqno + 1
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			chunk, err := idx.initChunk(lastSeqno)
+			if err != nil {
+				idx.logger.Error("failed to initialize chunk", zap.Error(err))
+				time.Sleep(time.Second)
+				continue
+			}
+
+			// Process blocks in parallel
+			for _, block := range chunk.blocks {
+				for _, ch := range channels {
+					select {
+					case ch <- block:
+						idx.logger.Debug("sent block to channel",
+							zap.String("block_id", block.ID.String()))
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+						idx.logger.Warn("channel full, skipping block",
+							zap.String("block_id", block.ID.String()))
+					}
+				}
+			}
+
+			lastSeqno = chunk.masterID.Seqno + 1
+		}
+	}
 }
 
 func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan IDandBlock) (*chunk, error) {
