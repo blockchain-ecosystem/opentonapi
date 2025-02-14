@@ -30,8 +30,8 @@ var (
 )
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	s.logger.Info("getting trace",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("getting trace",
+	// 	zap.String("hash", hash.Hex()))
 
 	if s == nil {
 		return nil, fmt.Errorf("storage is nil")

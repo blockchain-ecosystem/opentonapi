@@ -52,7 +52,7 @@ func TestLiteStorage_run(t *testing.T) {
 				// trackingAccounts:        tt.trackingAccounts,
 			}
 			ch := make(chan indexer.IDandBlock)
-			go s.run(ch)
+			go s.run(context.Background(), ch)
 
 			block, err := cli.GetBlock(context.Background(), tt.blockID)
 			require.Nil(t, err)

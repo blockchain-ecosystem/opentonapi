@@ -326,17 +326,24 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 			continue
 		}
 
-		s.logger.Info("processing block",
-			zap.String("block_id", block.ID.String()),
-			zap.Int("tx_count", len(block.Block.AllTransactions())),
-			zap.Uint32("seqno", block.ID.Seqno))
+		// s.logger.Info("processing block",
+		// 	zap.String("block_id", block.ID.String()),
+		// 	zap.Int("tx_count", len(block.Block.AllTransactions())),
+		// 	zap.Uint32("seqno", block.ID.Seqno))
 
 		// Process and store transactions
 		for _, tx := range block.Block.AllTransactions() {
+			s.logger.Info("processing transaction",
+				zap.String("tx_hash", tx.Hash().Hex()),
+				zap.Uint64("lt", tx.Lt))
+
 			accountID := tongo.AccountID{
 				Workchain: block.ID.Workchain,
 				Address:   tx.AccountAddr,
 			}
+			s.logger.Debug("transaction account info",
+				zap.String("account", accountID.String()),
+				zap.Int32("workchain", block.ID.Workchain))
 
 			transaction, err := safeConvertTransaction(block.ID.Workchain, tongo.Transaction{
 				BlockID:     block.ID,
@@ -344,11 +351,16 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 			}, nil)
 
 			if err != nil {
-				s.logger.Error("failed to convert transaction", zap.Error(err))
+				s.logger.Error("failed to convert transaction",
+					zap.String("tx_hash", tx.Hash().Hex()),
+					zap.Error(err))
 				continue
 			}
 
 			hash := tongo.Bits256(tx.Hash())
+			s.logger.Info("storing transaction",
+				zap.String("hash", hash.Hex()))
+
 			if err := s.storeTransaction(hash, transaction); err != nil {
 				s.logger.Error("failed to store transaction",
 					zap.String("hash", hash.Hex()),
@@ -357,6 +369,9 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 			}
 
 			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+				s.logger.Debug("storing transaction by LT",
+					zap.String("account", accountID.String()),
+					zap.Uint64("lt", createLT.lt))
 				s.StoreTransactionByInMsgLT(accountID.String(), createLT.lt, hash)
 			}
 		}
@@ -567,25 +582,37 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+	s.logger.Info("starting transaction lookup",
+		zap.String("hash", hash.Hex()))
+
 	// Try getting from DB first
 	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err == nil {
+		s.logger.Info("found transaction in DB")
 		return tx, nil
 	}
+	s.logger.Info("transaction not found in DB, trying workchains")
 
 	// Try workchain 0 first since that's where most transactions are
 	workchains := []int32{0, -1}
 	for _, wc := range workchains {
+		s.logger.Info("trying workchain", zap.Int32("workchain", wc))
 		info, err := s.client.GetMasterchainInfo(ctx)
 		if err != nil {
+			s.logger.Error("failed to get masterchain info", zap.Error(err))
 			continue
 		}
 
 		blockID := info.Last.ToBlockIdExt()
-		blockID.Workchain = wc // Set the correct workchain
+		blockID.Workchain = wc
+		s.logger.Info("searching in block",
+			zap.String("block_id", blockID.String()))
 
 		block, err := s.client.GetBlock(ctx, blockID)
 		if err != nil {
+			s.logger.Error("failed to get block",
+				zap.String("block_id", blockID.String()),
+				zap.Error(err))
 			continue
 		}
 
@@ -615,7 +642,7 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		}
 	}
 
-	// If not found in recent blocks, try searching backwards
+	s.logger.Info("transaction not found in recent blocks, trying chain search")
 	return s.fetchTransactionFromChain(ctx, hash)
 }
 
@@ -859,6 +886,11 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 				if err := s.storeTransaction(hash, transaction); err != nil {
 					return nil, err
 				}
+
+				s.logger.Info("searching block in chain",
+					zap.String("block_id", blockID.String()),
+					zap.Uint32("seqno", blockID.Seqno),
+					zap.Int32("workchain", blockID.Workchain))
 
 				return transaction, nil
 			}
