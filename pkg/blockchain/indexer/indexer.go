@@ -115,7 +115,22 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 			idx.logger.Info("lite server synced",
 				zap.Uint32("seqno", info.Last.Seqno))
 
-			return
+			// Process initial chunk blocks
+			for _, block := range chunk.blocks {
+				for _, ch := range channels {
+					select {
+					case ch <- block:
+						idx.logger.Debug("sent initial block to channel",
+							zap.String("block_id", block.ID.String()))
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+						idx.logger.Warn("channel full, skipping initial block",
+							zap.String("block_id", block.ID.String()))
+						continue
+					}
+				}
+			}
 		}
 		break
 	}
@@ -147,23 +162,6 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 			// Reset backoff on success
 			backoff = time.Second
 			chunk = next
-
-			// Process blocks with timeout
-			for _, block := range next.blocks {
-				for _, ch := range channels {
-					select {
-					case ch <- block:
-						idx.logger.Debug("sent block to channel",
-							zap.String("block_id", block.ID.String()))
-					case <-ctx.Done():
-						return
-					case <-time.After(5 * time.Second):
-						idx.logger.Warn("channel full, skipping block",
-							zap.String("block_id", block.ID.String()))
-						continue
-					}
-				}
-			}
 		}
 	}
 }
@@ -244,23 +242,6 @@ func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan 
 		return chunkBlocks[i].Block.Info.StartLt < chunkBlocks[j].Block.Info.StartLt
 	})
 	currentChunk.blocks = chunkBlocks
-
-	// After processing blocks in the chunk
-	for _, block := range chunkBlocks {
-		for _, ch := range channels {
-			select {
-			case ch <- block:
-				idx.logger.Debug("sent block to channel",
-					zap.String("block_id", block.ID.String()))
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(5 * time.Second):
-				idx.logger.Warn("channel full, skipping block",
-					zap.String("block_id", block.ID.String()))
-				continue
-			}
-		}
-	}
 	return &currentChunk, nil
 }
 
