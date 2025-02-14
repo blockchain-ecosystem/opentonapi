@@ -588,13 +588,12 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	// Try getting from DB first
 	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err == nil {
-		s.logger.Info("found transaction in DB",
-			zap.String("hash", hash.Hex()))
+		s.logger.Info("found transaction in DB")
 		return tx, nil
 	}
 
-	// Try both workchains
-	workchains := []int32{0, -1} // Try workchain 0 first
+	// Try both workchains with retries
+	workchains := []int32{0, -1}
 	for _, wc := range workchains {
 		s.logger.Info("searching in workchain",
 			zap.Int32("workchain", wc),
@@ -608,12 +607,23 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 		blockID := info.Last.ToBlockIdExt()
 		blockID.Workchain = wc
-		s.logger.Info("searching in block",
-			zap.String("block_id", blockID.String()))
 
-		block, err := s.client.GetBlock(ctx, blockID)
+		// Try with retries
+		var block tlb.Block
+		err = retry.Do(func() error {
+			b, err := s.client.GetBlock(ctx, blockID)
+			if err != nil {
+				return err
+			}
+			block = b
+			return nil
+		},
+			retry.Attempts(3),
+			retry.Delay(time.Second),
+			retry.DelayType(retry.BackOffDelay))
+
 		if err != nil {
-			s.logger.Error("failed to get block",
+			s.logger.Error("failed to get block after retries",
 				zap.String("block_id", blockID.String()),
 				zap.Error(err))
 			continue
@@ -625,14 +635,9 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 				zap.Error(err))
 		}
 
-		// Search in current block
+		// Find and convert the transaction
 		for _, tx := range block.AllTransactions() {
-			txHash := tongo.Bits256(tx.Hash())
-			if txHash == hash {
-				s.logger.Info("found transaction in block",
-					zap.String("hash", hash.Hex()),
-					zap.String("block_id", blockID.String()))
-
+			if tongo.Bits256(tx.Hash()) == hash {
 				transaction, err := safeConvertTransaction(wc, tongo.Transaction{
 					BlockID:     blockID,
 					Transaction: *tx,
