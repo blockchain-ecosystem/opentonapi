@@ -272,7 +272,9 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 		for _, tx := range block.Block.AllTransactions() {
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
 			hash := tongo.Bits256(tx.Hash())
-			transaction, err := core.ConvertTransaction(block.ID.Workchain,
+
+			// Use safe conversion
+			transaction, err := safeConvertTransaction(block.ID.Workchain,
 				tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
 			if err != nil {
 				s.logger.Error("failed to process tx",
@@ -662,4 +664,18 @@ func (s *LiteStorage) getClient() (*liteapi.Client, func()) {
 // Add context timeout wrapper
 func (s *LiteStorage) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, s.timeout)
+}
+
+func safeConvertTransaction(workchain int32, tx tongo.Transaction, cd *abi.ContractDescription) (*core.Transaction, error) {
+	var result *core.Transaction
+	var err error
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in transaction conversion: %v", r)
+		}
+	}()
+
+	result, err = core.ConvertTransaction(workchain, tx, cd)
+	return result, err
 }

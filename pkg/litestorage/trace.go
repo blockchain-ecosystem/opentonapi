@@ -12,6 +12,7 @@ import (
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
 	"github.com/tonkeeper/tongo/tlb"
+	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/pkg/core"
 )
@@ -190,16 +191,18 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 		if tx.AccountAddr != a.Address {
 			continue
 		}
-		inMsg := tx.Msgs.InMsg
-		if !back && inMsg.Exists && inMsg.Value.Value.Info.IntMsgInfo != nil && inMsg.Value.Value.Info.IntMsgInfo.CreatedLt == lt {
-			return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
+
+		transaction, err := safeConvertTransaction(a.Workchain, tongo.Transaction{
+			BlockID:     blockIDExt,
+			Transaction: *tx,
+		}, nil)
+		if err != nil {
+			s.logger.Error("failed to convert transaction", zap.Error(err))
+			continue
 		}
-		if back {
-			for _, m := range tx.Msgs.OutMsgs.Values() {
-				if m.Value.Info.IntMsgInfo != nil && m.Value.Info.IntMsgInfo.CreatedLt == lt {
-					return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
-				}
-			}
+
+		if matchTransaction(transaction, lt, back) {
+			return transaction, nil
 		}
 	}
 	return nil, fmt.Errorf("not found")
@@ -236,4 +239,21 @@ func (s *LiteStorage) getAccountInterfaces(ctx context.Context, id tongo.Account
 	interfaces = cd.ContractInterfaces
 	s.accountInterfacesCache.Store(id, interfaces)
 	return interfaces, nil
+}
+
+func matchTransaction(tx *core.Transaction, lt uint64, back bool) bool {
+	if tx == nil {
+		return false
+	}
+	if !back && tx.InMsg != nil && tx.InMsg.CreatedLt == lt {
+		return true
+	}
+	if back {
+		for _, m := range tx.OutMsgs {
+			if m.CreatedLt == lt {
+				return true
+			}
+		}
+	}
+	return false
 }
