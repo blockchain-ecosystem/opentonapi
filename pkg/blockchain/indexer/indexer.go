@@ -152,16 +152,33 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 					idx.logger.Warn("block not ready, waiting",
 						zap.Duration("backoff", backoff),
 						zap.Error(err))
-					continue
+				} else {
+					idx.logger.Error("failed to get next chunk", zap.Error(err))
+					time.Sleep(time.Second)
 				}
-				idx.logger.Error("failed to get next chunk", zap.Error(err))
-				time.Sleep(time.Second)
 				continue
 			}
 
 			// Reset backoff on success
 			backoff = time.Second
 			chunk = next
+
+			// Process blocks with timeout
+			for _, block := range next.blocks {
+				for _, ch := range channels {
+					select {
+					case ch <- block:
+						idx.logger.Debug("sent block to channel",
+							zap.String("block_id", block.ID.String()))
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+						idx.logger.Warn("channel full, skipping block",
+							zap.String("block_id", block.ID.String()))
+						continue
+					}
+				}
+			}
 		}
 	}
 }
