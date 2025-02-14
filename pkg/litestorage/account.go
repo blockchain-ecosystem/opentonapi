@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
-	"github.com/tonkeeper/tongo/abi"
+	"fmt"
 	"time"
+
+	"github.com/tonkeeper/tongo/abi"
 
 	"github.com/tonkeeper/tongo/tlb"
 	tongoWallet "github.com/tonkeeper/tongo/wallet"
@@ -26,14 +28,49 @@ func (s *LiteStorage) GetAccountState(ctx context.Context, a tongo.AccountID) (t
 	return s.client.GetAccountState(ctx, a)
 }
 
-func (s *LiteStorage) AccountStatusAndInterfaces(addr tongo.AccountID) (tlb.AccountStatus, []abi.ContractInterface, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+func (s *LiteStorage) AccountStatusAndInterfaces(ctx context.Context, addr tongo.AccountID) (tlb.AccountStatus, []abi.ContractInterface, error) {
+	if s == nil {
+		return tlb.AccountNone, nil, fmt.Errorf("storage is nil")
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 	defer cancel()
-	account, err := s.GetRawAccount(ctx, addr) //todo: get only 2 fields
+
+	client, release := s.getClient()
+	if client == nil {
+		return tlb.AccountNone, nil, fmt.Errorf("failed to get lite client")
+	}
+	defer release()
+
+	account, err := s.GetRawAccount(ctx, addr)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return tlb.AccountNone, nil, nil
 	}
-	return account.Status, account.Interfaces, err
+	if err != nil {
+		return tlb.AccountNone, nil, fmt.Errorf("get raw account: %w", err)
+	}
+	if account == nil {
+		return tlb.AccountNone, nil, nil
+	}
+
+	// Get interfaces from cache or compute them
+	interfaces, _ := s.accountInterfacesCache.LoadOrCompute(addr, func() []abi.ContractInterface {
+		if account.Code == nil {
+			return nil
+		}
+		inspector := abi.NewContractInspector(abi.InspectWithLibraryResolver(s))
+		cd, err := inspector.InspectContract(ctx, account.Code, s.executor, addr)
+		if err != nil {
+			return nil
+		}
+		return cd.ContractInterfaces
+	})
+
+	return account.Status, interfaces, nil
 }
 
 func (s *LiteStorage) SearchAccountsByPubKey(ctx context.Context, pubKey ed25519.PublicKey) ([]tongo.AccountID, error) {

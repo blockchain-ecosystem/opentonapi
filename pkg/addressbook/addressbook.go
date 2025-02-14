@@ -1,6 +1,7 @@
 package addressbook
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/exp/slices"
 
 	"github.com/tonkeeper/opentonapi/pkg/cache"
+	"github.com/tonkeeper/opentonapi/pkg/litestorage"
 	"github.com/tonkeeper/opentonapi/pkg/oas"
 )
 
@@ -84,7 +86,7 @@ type addresser interface {
 }
 
 type accountsStatesSource interface {
-	AccountStatusAndInterfaces(a tongo.AccountID) (tlb.AccountStatus, []abi.ContractInterface, error)
+	AccountStatusAndInterfaces(addr tongo.AccountID) (tlb.AccountStatus, []abi.ContractInterface, error)
 }
 
 func WithAdditionalAddressesSource(a addresser) Option {
@@ -343,8 +345,24 @@ func (m *manualAddresser) refreshAddresses(addressPath, jettonPath string) error
 	return nil
 }
 
+type storageAdapter struct {
+	storage *litestorage.LiteStorage
+}
+
+func (s *storageAdapter) AccountStatusAndInterfaces(addr tongo.AccountID) (tlb.AccountStatus, []abi.ContractInterface, error) {
+	if s.storage == nil {
+		return tlb.AccountNone, nil, fmt.Errorf("storage is nil")
+	}
+	ctx := context.Background()
+	return s.storage.AccountStatusAndInterfaces(ctx, addr)
+}
+
 // NewAddressBook initializes a Book and starts background refreshers tasks
-func NewAddressBook(logger *zap.Logger, addressPath, jettonPath, collectionPath string, storage accountsStatesSource, opts ...Option) *Book {
+func NewAddressBook(logger *zap.Logger, addressPath, jettonPath, collectionPath string, storage *litestorage.LiteStorage, opts ...Option) *Book {
+	if storage == nil {
+		logger.Fatal("storage cannot be nil")
+	}
+	adapter := &storageAdapter{storage: storage}
 	var manual = &manualAddresser{
 		addresses: make(map[tongo.AccountID]KnownAddress),
 	}
@@ -358,7 +376,7 @@ func NewAddressBook(logger *zap.Logger, addressPath, jettonPath, collectionPath 
 	tfPools := make(map[tongo.AccountID]TFPoolInfo)
 
 	book := &Book{
-		states:          storage,
+		states:          adapter,
 		collections:     collections,
 		jettons:         jettons,
 		tfPools:         tfPools,
