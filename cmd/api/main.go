@@ -39,8 +39,8 @@ func main() {
 	cfg := config.Load()
 	log := app.Logger(cfg.App.LogLevel)
 
-	storageBlockCh := make(chan indexer.IDandBlock, 1000)
-	pusherBlockCh := make(chan indexer.IDandBlock, 1000)
+	storageBlockCh := make(chan indexer.IDandBlock, 5000)
+	pusherBlockCh := make(chan indexer.IDandBlock, 5000)
 
 	var err error
 	var client *liteapi.Client
@@ -145,6 +145,43 @@ func main() {
 	server.Run(fmt.Sprintf(":%d", cfg.API.Port), cfg.API.UnixSockets)
 
 	defer cleanup(storage, idx, storageBlockCh, pusherBlockCh)
+
+	// Add channel drain function
+	drainChannel := func(ch chan indexer.IDandBlock) {
+		for len(ch) > cap(ch)/2 { // Drain if more than half full
+			select {
+			case <-ch:
+			default:
+				return
+			}
+		}
+	}
+
+	// Add periodic channel monitoring
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if len(storageBlockCh) > cap(storageBlockCh)*80/100 {
+					log.Warn("storage channel near capacity, draining",
+						zap.Int("current", len(storageBlockCh)),
+						zap.Int("capacity", cap(storageBlockCh)))
+					drainChannel(storageBlockCh)
+				}
+				if len(pusherBlockCh) > cap(pusherBlockCh)*80/100 {
+					log.Warn("pusher channel near capacity, draining",
+						zap.Int("current", len(pusherBlockCh)),
+						zap.Int("capacity", cap(pusherBlockCh)))
+					drainChannel(pusherBlockCh)
+				}
+			}
+		}
+	}()
 }
 
 func cleanup(storage *litestorage.LiteStorage, idx *indexer.Indexer, storageBlockCh, pusherBlockCh chan indexer.IDandBlock) {

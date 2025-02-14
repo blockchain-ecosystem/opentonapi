@@ -38,36 +38,84 @@ type IDandBlock struct {
 }
 
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
-	rateLimiter := time.NewTicker(200 * time.Millisecond)
-	defer rateLimiter.Stop()
+	// Wait for initial sync
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			info, err := idx.cli.GetMasterchainInfo(ctx)
+			if err != nil {
+				idx.logger.Error("failed to get masterchain info", zap.Error(err))
+				time.Sleep(time.Second * 5)
+				continue
+			}
 
-	// Add backoff for retries
+			// Get current masterchain state
+			state, err := idx.cli.GetMasterchainInfoExt(ctx, 0)
+			if err != nil {
+				idx.logger.Error("failed to get masterchain state", zap.Error(err))
+				time.Sleep(time.Second * 5)
+				continue
+			}
+
+			if state.Last.Seqno-info.Last.Seqno < 10 {
+				idx.logger.Info("lite server synced",
+					zap.Uint32("current_seqno", state.Last.Seqno),
+					zap.Uint32("last_known_seqno", info.Last.Seqno))
+				break
+			}
+
+			idx.logger.Warn("waiting for lite server to sync",
+				zap.Uint32("current_seqno", state.Last.Seqno),
+				zap.Uint32("last_known_seqno", info.Last.Seqno))
+			time.Sleep(time.Second * 10)
+		}
+	}
+
+	// Process blocks with backoff
+	chunk := &chunk{}
 	backoff := time.Second
-	maxBackoff := time.Minute
+	maxBackoff := time.Minute * 2
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-rateLimiter.C:
-			info, err := idx.cli.GetMasterchainInfo(ctx)
+		default:
+			next, err := idx.next(chunk)
 			if err != nil {
-				idx.logger.Error("failed to get masterchain info", zap.Error(err))
-				time.Sleep(backoff)
-				backoff = min(backoff*2, maxBackoff)
+				if isBlockNotReadyError(err) || isBlockNotResolved(err) {
+					time.Sleep(backoff)
+					backoff = min(backoff*2, maxBackoff)
+					idx.logger.Warn("block not ready, waiting",
+						zap.Duration("backoff", backoff),
+						zap.Error(err))
+					continue
+				}
+				idx.logger.Error("failed to get next chunk", zap.Error(err))
+				time.Sleep(time.Second)
 				continue
 			}
 
-			chunk, err := idx.initChunk(info.Last.Seqno)
-			if err != nil {
-				idx.logger.Error("failed to get init chunk", zap.Error(err))
-				time.Sleep(backoff)
-				continue
-			}
+			// Reset backoff on success
+			backoff = time.Second
+			chunk = next
 
-			// If we successfully get here, start processing blocks
-			idx.processBlocks(ctx, chunk, channels)
-			return
+			// Process blocks with timeout
+			for _, block := range next.blocks {
+				for _, ch := range channels {
+					select {
+					case ch <- block:
+					case <-ctx.Done():
+						return
+					case <-time.After(5 * time.Second):
+						idx.logger.Warn("channel full, skipping block",
+							zap.String("block_id", block.ID.String()))
+						continue
+					}
+				}
+			}
 		}
 	}
 }
@@ -214,4 +262,15 @@ func (idx *Indexer) initChunk(seqno uint32) (*chunk, error) {
 		ch.ids[shard] = struct{}{}
 	}
 	return ch, nil
+}
+
+func isBlockNotResolved(err error) bool {
+	return strings.Contains(err.Error(), "failed to resolve block")
+}
+
+func isBlockNotReadyError(err error) bool {
+	return strings.Contains(err.Error(), "ltdb: block not found") ||
+		strings.Contains(err.Error(), "block is not applied") ||
+		strings.Contains(err.Error(), "is not in db") ||
+		strings.Contains(err.Error(), "is not applied")
 }
