@@ -169,6 +169,18 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan IDandBlock) (*chunk, error) {
 	nextMasterID := prevChunk.masterID
 	nextMasterID.Seqno += 1
+
+	// Get current masterchain info to validate seqno
+	info, err := idx.cli.GetMasterchainInfo(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	// Ensure we're not requesting a block beyond what's available
+	if nextMasterID.Seqno > info.Last.Seqno {
+		return nil, fmt.Errorf("block not ready: requested %d, last known %d", nextMasterID.Seqno, info.Last.Seqno)
+	}
+
 	masterBlockID, _, err := idx.cli.LookupBlock(context.Background(), nextMasterID, 1, nil, nil)
 	if err != nil {
 		return nil, err

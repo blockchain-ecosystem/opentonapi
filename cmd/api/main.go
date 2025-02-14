@@ -90,7 +90,7 @@ func main() {
 		log.Fatal("failed to create api handler", zap.Error(err))
 	}
 	source := sources.NewBlockchainSource(log, client)
-	pusherBlockCh = source.Run(ctx)
+	source.Run(ctx, pusherBlockCh)
 
 	// Add readiness check here
 	ready := make(chan struct{})
