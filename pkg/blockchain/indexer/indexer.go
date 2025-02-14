@@ -265,11 +265,6 @@ func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan 
 }
 
 func (idx *Indexer) initChunk(seqno uint32) (*chunk, error) {
-	// Ensure seqno doesn't underflow
-	if seqno == 0 {
-		seqno = 1
-	}
-
 	// Get current masterchain info to validate seqno
 	info, err := idx.cli.GetMasterchainInfo(context.Background())
 	if err != nil {
@@ -277,7 +272,7 @@ func (idx *Indexer) initChunk(seqno uint32) (*chunk, error) {
 	}
 
 	// Ensure we're not requesting a block beyond what's available
-	if seqno > info.Last.Seqno {
+	if seqno > info.Last.Seqno || seqno == 0 {
 		seqno = info.Last.Seqno
 	}
 
