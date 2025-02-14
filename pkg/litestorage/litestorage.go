@@ -218,7 +218,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 				zap.Error(err))
 		}
 	})
-	go s.run(o.blockCh)
+	go s.run(context.Background(), o.blockCh)
 	go s.runBlockchainConfigUpdate(5 * time.Second)
 
 	// Initialize connection pool
@@ -306,13 +306,8 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 	return hash, err
 }
 
-func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
+func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 	s.logger.Info("starting block processing loop before nil check")
-	if ch == nil {
-		s.logger.Error("nil block channel provided")
-		return
-	}
-
 	s.logger.Info("starting block processing loop",
 		zap.Int("channel_capacity", cap(ch)),
 		zap.Int("channel_length", len(ch)))
@@ -324,10 +319,6 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 		}
 
 		// Store block first
-		s.logger.Info("processing block",
-			zap.String("block_id", block.ID.String()),
-			zap.Int("tx_count", len(block.Block.AllTransactions())),
-			zap.Int64("seqno", int64(block.ID.Seqno)))
 		if err := s.storeBlock(block.ID, block.Block); err != nil {
 			s.logger.Error("failed to store block",
 				zap.String("block_id", block.ID.String()),
@@ -335,55 +326,41 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 			continue
 		}
 
-		// Process transactions
+		s.logger.Info("processing block",
+			zap.String("block_id", block.ID.String()),
+			zap.Int("tx_count", len(block.Block.AllTransactions())),
+			zap.Uint32("seqno", block.ID.Seqno))
+
+		// Process and store transactions
 		for _, tx := range block.Block.AllTransactions() {
-			if tx == nil {
-				s.logger.Error("nil transaction in block",
-					zap.String("block_id", block.ID.String()))
+			accountID := tongo.AccountID{
+				Workchain: block.ID.Workchain,
+				Address:   tx.AccountAddr,
+			}
+
+			transaction, err := safeConvertTransaction(block.ID.Workchain, tongo.Transaction{
+				BlockID:     block.ID,
+				Transaction: *tx,
+			}, nil)
+
+			if err != nil {
+				s.logger.Error("failed to convert transaction", zap.Error(err))
 				continue
 			}
 
-			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
 			hash := tongo.Bits256(tx.Hash())
-
-			s.logger.Debug("processing transaction",
-				zap.String("block_id", block.ID.String()),
-				zap.String("tx_hash", hash.Hex()),
-				zap.String("account", accountID.String()))
-
-			// Use safe conversion
-			transaction, err := safeConvertTransaction(block.ID.Workchain,
-				tongo.Transaction{Transaction: *tx, BlockID: block.ID}, nil)
-			if err != nil {
-				s.logger.Error("failed to process tx",
-					zap.String("tx-hash", hash.Hex()),
+			if err := s.storeTransaction(hash, transaction); err != nil {
+				s.logger.Error("failed to store transaction",
+					zap.String("hash", hash.Hex()),
 					zap.Error(err))
 				continue
 			}
-			// Add retry for storage
-			err = retry.Do(
-				func() error {
-					return s.storeTransactionWithRetry(hash, transaction)
-				},
-				retry.Attempts(3),
-				retry.Delay(100*time.Millisecond),
-			)
 
-			if err != nil {
-				s.logger.Error("failed to store tx after retries",
-					zap.String("tx-hash", hash.Hex()),
-					zap.Error(err))
-			}
-
-			createLT, ok := extractInMsgCreatedLT(accountID, tx)
-			if ok {
-				// s.transactionsByInMsgLT.Store(createLT, hash)
+			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
 				s.StoreTransactionByInMsgLT(accountID.String(), createLT.lt, hash)
 			}
 		}
 	}
-
-	s.logger.Info("block processing loop ended")
 }
 
 func (s *LiteStorage) GetContract(ctx context.Context, id tongo.AccountID) (*core.Contract, error) {
