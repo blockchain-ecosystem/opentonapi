@@ -39,16 +39,29 @@ type IDandBlock struct {
 }
 
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
-	// Validate channels
 	if len(channels) == 0 {
 		idx.logger.Error("no channels provided for indexer")
 		return
 	}
 
+	idx.logger.Info("indexer starting",
+		zap.Int("channel_count", len(channels)),
+		zap.Int("first_channel_capacity", cap(channels[0])))
+
 	// Add buffer monitoring
 	for i, ch := range channels {
 		go idx.monitorChannel(ctx, ch, i)
 	}
+
+	chunk, err := idx.initChunk(0) // Or whatever initial seqno you want
+	if err != nil {
+		idx.logger.Error("failed to initialize chunk", zap.Error(err))
+		return
+	}
+
+	idx.logger.Info("initial chunk created",
+		zap.String("master_id", chunk.masterID.String()),
+		zap.Int("block_count", len(chunk.blocks)))
 
 	// Wait for initial sync
 	for {
@@ -107,7 +120,6 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 	}
 
 	// Process blocks with backoff
-	chunk := &chunk{}
 	backoff := time.Second
 	maxBackoff := time.Minute * 2
 
@@ -116,7 +128,7 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 		case <-ctx.Done():
 			return
 		default:
-			next, err := idx.next(chunk)
+			next, err := idx.next(ctx, chunk, channels)
 			if err != nil {
 				if isBlockNotReadyError(err) || isBlockNotResolved(err) {
 					time.Sleep(backoff)
@@ -140,6 +152,8 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				for _, ch := range channels {
 					select {
 					case ch <- block:
+						idx.logger.Debug("sent block to channel",
+							zap.String("block_id", block.ID.String()))
 					case <-ctx.Done():
 						return
 					case <-time.After(5 * time.Second):
@@ -153,43 +167,7 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 	}
 }
 
-func (idx *Indexer) processBlocks(ctx context.Context, chunk *chunk, channels []chan IDandBlock) {
-	blockTicker := time.NewTicker(500 * time.Millisecond)
-	defer blockTicker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-blockTicker.C:
-			next, err := idx.next(chunk)
-			if err != nil {
-				if isBlockNotReadyError(err) {
-					continue
-				}
-				idx.logger.Error("failed to get next chunk", zap.Error(err))
-				continue
-			}
-
-			for _, block := range next.blocks {
-				for _, ch := range channels {
-					select {
-					case ch <- block:
-					case <-ctx.Done():
-						return
-					case <-time.After(5 * time.Second):
-						// Add timeout instead of skipping immediately
-						idx.logger.Warn("channel full, timeout reached")
-						continue
-					}
-				}
-			}
-			chunk = next
-		}
-	}
-}
-
-func (idx *Indexer) next(prevChunk *chunk) (*chunk, error) {
+func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan IDandBlock) (*chunk, error) {
 	nextMasterID := prevChunk.masterID
 	nextMasterID.Seqno += 1
 	masterBlockID, _, err := idx.cli.LookupBlock(context.Background(), nextMasterID, 1, nil, nil)
@@ -265,6 +243,23 @@ func (idx *Indexer) next(prevChunk *chunk) (*chunk, error) {
 		return chunkBlocks[i].Block.Info.StartLt < chunkBlocks[j].Block.Info.StartLt
 	})
 	currentChunk.blocks = chunkBlocks
+
+	// After processing blocks in the chunk
+	for _, block := range chunkBlocks {
+		for _, ch := range channels {
+			select {
+			case ch <- block:
+				idx.logger.Debug("sent block to channel",
+					zap.String("block_id", block.ID.String()))
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(5 * time.Second):
+				idx.logger.Warn("channel full, skipping block",
+					zap.String("block_id", block.ID.String()))
+				continue
+			}
+		}
+	}
 	return &currentChunk, nil
 }
 
