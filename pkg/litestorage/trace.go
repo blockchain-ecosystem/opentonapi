@@ -2,6 +2,7 @@ package litestorage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/tonkeeper/tongo/tlb"
 	"go.uber.org/zap"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 )
 
@@ -200,10 +202,15 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 			BlockID:     blockIDExt,
 			Transaction: *tx,
 		}, nil)
+
+		if err == nil {
+			// Store transaction in DB
+			err = s.storeTransaction(tongo.Bits256(tx.Hash()), transaction)
+		}
 		s.txMutex.Unlock()
 
 		if err != nil {
-			s.logger.Error("failed to convert transaction", zap.Error(err))
+			s.logger.Error("failed to process transaction", zap.Error(err))
 			continue
 		}
 
@@ -263,3 +270,58 @@ func matchTransaction(tx *core.Transaction, lt uint64, back bool) bool {
 	}
 	return false
 }
+
+func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+	s.txMutex.RLock()
+	defer s.txMutex.RUnlock()
+
+	var tx *core.Transaction
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := append([]byte("tx:"), hash[:]...)
+		item, err := txn.Get(key)
+		if err != nil {
+			return err
+		}
+
+		return item.Value(func(val []byte) error {
+			return json.Unmarshal(val, &tx)
+		})
+	})
+
+	if err != nil {
+		// Try fetching from blockchain if not in DB
+		// return s.fetchTransactionFromChain(ctx, hash)
+	}
+
+	return tx, nil
+}
+
+// func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+// 	client, release := s.getClient()
+// 	if client == nil {
+// 		return nil, fmt.Errorf("failed to get lite client")
+// 	}
+// 	defer release()
+
+// 	var tx *tongo.Transaction
+// 	err := retry.Do(func() error {
+// 		var err error
+// 		rawTx, err := client.gettr(ctx, hash)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		tx = rawTx
+// 		return nil
+// 	}, retry.Attempts(3), retry.Delay(time.Second))
+
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to fetch transaction: %w", err)
+// 	}
+
+// 	transaction, err := safeConvertTransaction(tx.BlockID.Workchain, *tx, nil)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to convert transaction: %w", err)
+// 	}
+
+// 	return transaction, nil
+// }

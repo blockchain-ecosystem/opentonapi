@@ -234,14 +234,28 @@ func (s *LiteStorage) Shutdown() {
 }
 
 func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), hash[:]...)
-		value, err := json.Marshal(tx)
-		if err != nil {
-			return err
-		}
-		return txn.Set(key, value)
-	})
+	if tx == nil {
+		return fmt.Errorf("nil transaction")
+	}
+
+	s.txMutex.Lock()
+	defer s.txMutex.Unlock()
+
+	// Store in DB with retry mechanism
+	return retry.Do(
+		func() error {
+			key := append([]byte("tx:"), hash[:]...)
+			return s.db.Update(func(txn *badger.Txn) error {
+				data, err := json.Marshal(tx)
+				if err != nil {
+					return err
+				}
+				return txn.Set(key, data)
+			})
+		},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+	)
 }
 
 func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, error) {
