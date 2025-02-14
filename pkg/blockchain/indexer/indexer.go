@@ -39,6 +39,17 @@ type IDandBlock struct {
 }
 
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
+	// Validate channels
+	if len(channels) == 0 {
+		idx.logger.Error("no channels provided for indexer")
+		return
+	}
+
+	// Add buffer monitoring
+	for i, ch := range channels {
+		go idx.monitorChannel(ctx, ch, i)
+	}
+
 	// Wait for initial sync
 	for {
 		select {
@@ -295,4 +306,23 @@ func isBlockNotReadyError(err error) bool {
 		strings.Contains(err.Error(), "block is not applied") ||
 		strings.Contains(err.Error(), "is not in db") ||
 		strings.Contains(err.Error(), "is not applied")
+}
+
+func (idx *Indexer) monitorChannel(ctx context.Context, ch chan IDandBlock, index int) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if len(ch) > cap(ch)*80/100 {
+				idx.logger.Warn("channel near capacity",
+					zap.Int("channel_index", index),
+					zap.Int("current", len(ch)),
+					zap.Int("capacity", cap(ch)))
+			}
+		}
+	}
 }

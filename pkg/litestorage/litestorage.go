@@ -142,6 +142,14 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		return nil, fmt.Errorf("lite client cannot be nil")
 	}
 
+	// Test connection before proceeding
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := cli.GetMasterchainInfo(ctx); err != nil {
+		return nil, fmt.Errorf("failed to connect to lite server: %w", err)
+	}
+
 	o := &Options{}
 	for i := range opts {
 		opts[i](o)
@@ -207,6 +215,12 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 	})
 	go s.run(o.blockCh)
 	go s.runBlockchainConfigUpdate(5 * time.Second)
+
+	// Initialize connection pool
+	for i := 0; i < s.maxConns; i++ {
+		s.connPool.Put(cli)
+	}
+
 	return s, nil
 }
 
@@ -278,10 +292,23 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 	if ch == nil {
+		s.logger.Error("nil block channel provided")
 		return
 	}
+
 	for block := range ch {
+		if block.Block == nil {
+			s.logger.Error("received nil block")
+			continue
+		}
+
 		for _, tx := range block.Block.AllTransactions() {
+			if tx == nil {
+				s.logger.Error("nil transaction in block",
+					zap.String("block_id", block.ID.String()))
+				continue
+			}
+
 			accountID := *ton.NewAccountID(block.ID.Workchain, tx.AccountAddr)
 			hash := tongo.Bits256(tx.Hash())
 
