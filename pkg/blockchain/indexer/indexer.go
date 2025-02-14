@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -264,19 +265,38 @@ func (idx *Indexer) next(ctx context.Context, prevChunk *chunk, channels []chan 
 }
 
 func (idx *Indexer) initChunk(seqno uint32) (*chunk, error) {
+	// Ensure seqno doesn't underflow
+	if seqno == 0 {
+		seqno = 1
+	}
+
+	// Get current masterchain info to validate seqno
+	info, err := idx.cli.GetMasterchainInfo(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	// Ensure we're not requesting a block beyond what's available
+	if seqno > info.Last.Seqno {
+		seqno = info.Last.Seqno
+	}
+
 	init := tongo.BlockID{
 		Workchain: -1,
-		Shard:     9223372036854775808,
+		Shard:     uint64(tongo.MustParseShardID(-0x8000000000000000).Encode()),
 		Seqno:     seqno - 1,
 	}
+
 	id, _, err := idx.cli.LookupBlock(context.Background(), init, 1, nil, nil)
 	if err != nil {
 		return nil, err
 	}
+
 	block, err := idx.cli.GetBlock(context.Background(), id)
 	if err != nil {
 		return nil, err
 	}
+
 	ch := &chunk{
 		masterID: init,
 		ids: map[tongo.BlockIDExt]struct{}{
@@ -286,6 +306,7 @@ func (idx *Indexer) initChunk(seqno uint32) (*chunk, error) {
 			{ID: id, Block: &block},
 		},
 	}
+
 	for _, shard := range tongo.ShardIDs(&block) {
 		ch.ids[shard] = struct{}{}
 	}
