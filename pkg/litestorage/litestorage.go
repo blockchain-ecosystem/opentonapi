@@ -573,14 +573,10 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		return tx, nil
 	}
 
-	// If not in DB, try fetching from chain
-	s.logger.Info("transaction not found in DB, fetching from chain",
-		zap.String("hash", hash.Hex()))
-
-	// First ensure we have the block
+	// If not in DB, try getting the block directly
 	info, err := s.client.GetMasterchainInfo(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+		return s.fetchTransactionFromChain(ctx, hash)
 	}
 
 	blockID := info.Last.ToBlockIdExt()
@@ -589,24 +585,32 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
 
-	// Store the block
 	if err := s.storeBlock(blockID, &block); err != nil {
 		s.logger.Error("failed to store block",
 			zap.String("block_id", blockID.String()),
 			zap.Error(err))
-		return nil, err
 	}
 
-	// Now try to fetch transaction
-	tx, err = s.fetchTransactionFromChain(ctx, hash)
-	if err != nil {
-		s.logger.Error("failed to get transaction",
-			zap.String("hash", hash.Hex()),
-			zap.Error(err))
-		return nil, fmt.Errorf("transaction not found: %w", err)
+	// Find and convert the transaction
+	for _, tx := range block.AllTransactions() {
+		if tongo.Bits256(tx.Hash()) == hash {
+			transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+				BlockID:     blockID,
+				Transaction: *tx,
+			}, nil)
+			if err != nil {
+				return nil, err
+			}
+
+			if err := s.storeTransaction(hash, transaction); err != nil {
+				return nil, err
+			}
+
+			return transaction, nil
+		}
 	}
 
-	return tx, nil
+	return nil, fmt.Errorf("transaction not found")
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
