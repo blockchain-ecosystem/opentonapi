@@ -573,44 +573,50 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		return tx, nil
 	}
 
-	// If not in DB, try getting the block directly
-	info, err := s.client.GetMasterchainInfo(ctx)
-	if err != nil {
-		return s.fetchTransactionFromChain(ctx, hash)
-	}
+	// Try workchain 0 first since that's where most transactions are
+	workchains := []int32{0, -1}
+	for _, wc := range workchains {
+		info, err := s.client.GetMasterchainInfo(ctx)
+		if err != nil {
+			continue
+		}
 
-	blockID := info.Last.ToBlockIdExt()
-	block, err := s.client.GetBlock(ctx, blockID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block: %w", err)
-	}
+		blockID := info.Last.ToBlockIdExt()
+		blockID.Workchain = wc // Set the correct workchain
 
-	if err := s.storeBlock(blockID, &block); err != nil {
-		s.logger.Error("failed to store block",
-			zap.String("block_id", blockID.String()),
-			zap.Error(err))
-	}
+		block, err := s.client.GetBlock(ctx, blockID)
+		if err != nil {
+			continue
+		}
 
-	// Find and convert the transaction
-	for _, tx := range block.AllTransactions() {
-		if tongo.Bits256(tx.Hash()) == hash {
-			transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
-				BlockID:     blockID,
-				Transaction: *tx,
-			}, nil)
-			if err != nil {
-				return nil, err
+		if err := s.storeBlock(blockID, &block); err != nil {
+			s.logger.Error("failed to store block",
+				zap.String("block_id", blockID.String()),
+				zap.Error(err))
+		}
+
+		// Find and convert the transaction
+		for _, tx := range block.AllTransactions() {
+			if tongo.Bits256(tx.Hash()) == hash {
+				transaction, err := safeConvertTransaction(wc, tongo.Transaction{
+					BlockID:     blockID,
+					Transaction: *tx,
+				}, nil)
+				if err != nil {
+					return nil, err
+				}
+
+				if err := s.storeTransaction(hash, transaction); err != nil {
+					return nil, err
+				}
+
+				return transaction, nil
 			}
-
-			if err := s.storeTransaction(hash, transaction); err != nil {
-				return nil, err
-			}
-
-			return transaction, nil
 		}
 	}
 
-	return nil, fmt.Errorf("transaction not found")
+	// If not found in recent blocks, try searching backwards
+	return s.fetchTransactionFromChain(ctx, hash)
 }
 
 func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash tongo.Bits256) (*tongo.Bits256, error) {
