@@ -27,6 +27,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
 	"github.com/tonkeeper/opentonapi/pkg/cache"
 	"github.com/tonkeeper/opentonapi/pkg/core"
@@ -90,6 +91,7 @@ type LiteStorage struct {
 	connPool            sync.Pool
 	maxConns            int
 	timeout             time.Duration
+	txMutex             sync.RWMutex
 }
 
 type Options struct {
@@ -148,7 +150,17 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		o.executor = cli
 	}
 
-	db, err := badger.Open(badger.DefaultOptions("./badger"))
+	badgerOpts := badger.DefaultOptions("./badger").
+		WithValueLogFileSize(1 << 30).   // 1GB value logs
+		WithNumVersionsToKeep(1).        // Single version
+		WithCompression(options.Snappy). // Enable compression
+		WithNumGoroutines(16).           // More concurrent processing
+		WithValueThreshold(32).          // Optimize for larger values
+		WithBlockCacheSize(8 << 30).     // 8GB block cache
+		WithIndexCacheSize(16 << 30).    // 16GB index cache
+		WithMemTableSize(512 << 20)      // 512MB memtable
+
+	db, err := badger.Open(badgerOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open badger: %w", err)
 	}
@@ -242,9 +254,9 @@ func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, err
 }
 
 func (s *LiteStorage) StoreTransactionByInMsgLT(accountID string, createLT uint64, hash tongo.Bits256) error {
+	key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
 	return s.db.Update(func(txn *badger.Txn) error {
-		key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
-		return txn.Set(key, hash[:]) // Store hash as value
+		return txn.SetEntry(badger.NewEntry(key, hash[:]).WithMeta(0x01))
 	})
 }
 
@@ -257,7 +269,7 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			copy(hash[:], val) // Convert bytes back to hash
+			copy(hash[:], val)
 			return nil
 		})
 	})

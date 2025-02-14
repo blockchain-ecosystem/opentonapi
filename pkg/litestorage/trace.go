@@ -153,6 +153,9 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
+	s.txMutex.RLock()
+	defer s.txMutex.RUnlock()
+
 	ctx, cancel := s.withTimeout(ctx)
 	defer cancel()
 
@@ -192,10 +195,13 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 			continue
 		}
 
+		s.txMutex.Lock()
 		transaction, err := safeConvertTransaction(a.Workchain, tongo.Transaction{
 			BlockID:     blockIDExt,
 			Transaction: *tx,
 		}, nil)
+		s.txMutex.Unlock()
+
 		if err != nil {
 			s.logger.Error("failed to convert transaction", zap.Error(err))
 			continue

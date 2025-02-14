@@ -138,21 +138,20 @@ func (t *Tracer) Run(ctx context.Context) {
 				return nil
 			}
 
-			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
-			// Use exponential backoff for retries
-			backoff := time.Second
-			for i := 0; i < 10; i++ { // Reduced retry count
+			backoff := 100 * time.Millisecond
+			for i := 0; i < 5; i++ {
 				trace, err := t.storage.GetTrace(ctx, hash)
 				if err != nil {
 					if errors.Is(err, context.DeadlineExceeded) {
 						t.logger.Error("trace retrieval timeout", zap.Error(err))
 						return nil
 					}
-					if i < 4 { // Don't sleep on last attempt
+					if i < 4 {
 						time.Sleep(backoff)
-						backoff *= 2 // Exponential backoff
+						backoff *= 2
 					}
 					continue
 				}
