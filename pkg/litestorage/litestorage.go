@@ -26,6 +26,8 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
+	"encoding/hex"
+
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
@@ -238,14 +240,12 @@ func (s *LiteStorage) Shutdown() {
 	s.stopCh <- struct{}{}
 }
 
+const (
+	txKeyPrefix    = "tx:"
+	blockKeyPrefix = "blk:"
+)
+
 func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction) error {
-	s.logger.Debug("storing transaction",
-		zap.String("hash", hash.Hex()))
-
-	if tx == nil {
-		return fmt.Errorf("nil transaction")
-	}
-
 	s.txMutex.Lock()
 	defer s.txMutex.Unlock()
 
@@ -254,29 +254,37 @@ func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction)
 		return fmt.Errorf("failed to marshal transaction: %w", err)
 	}
 
+	key := append([]byte(txKeyPrefix), hash[:]...)
+	s.logger.Debug("storing transaction with key",
+		zap.String("key", hex.EncodeToString(key)),
+		zap.String("hash", hash.Hex()))
+
 	return s.db.Update(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), hash[:]...)
 		return txn.Set(key, data)
 	})
 }
 
 func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, error) {
+	s.txMutex.RLock()
+	defer s.txMutex.RUnlock()
+
 	var tx core.Transaction
+	key := append([]byte(txKeyPrefix), hash[:]...)
+
+	s.logger.Debug("getting transaction with key",
+		zap.String("key", hex.EncodeToString(key)),
+		zap.String("hash", hash.Hex()))
+
 	err := s.db.View(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), hash[:]...)
 		item, err := txn.Get(key)
 		if err != nil {
 			return err
 		}
 		return item.Value(func(val []byte) error {
-			// fmt.Println("Raw JSON Data:", string(val))
-			errData := json.Unmarshal(val, &tx)
-			if errData != nil {
-				fmt.Println("JSON Unmarshal Error:", errData)
-			}
 			return json.Unmarshal(val, &tx)
 		})
 	})
+
 	if err != nil {
 		return nil, err
 	}
