@@ -567,23 +567,45 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_transaction").Observe(v)
-	}))
-	defer timer.ObserveDuration()
+	// Try getting from DB first
+	tx, err := s.getTransactionWithRetry(ctx, hash)
+	if err == nil {
+		return tx, nil
+	}
 
-	var tx *core.Transaction
-	err := retry.Do(func() error {
-		var err error
-		tx, err = s.getTransaction(hash)
-		return err
-	}, retry.Attempts(3), retry.Delay(100*time.Millisecond))
+	// If not in DB, try fetching from chain
+	s.logger.Info("transaction not found in DB, fetching from chain",
+		zap.String("hash", hash.Hex()))
+
+	// First ensure we have the block
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	blockID := info.Last.ToBlockIdExt()
+	block, err := s.client.GetBlock(ctx, blockID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %w", err)
+	}
+
+	// Store the block
+	if err := s.storeBlock(blockID, &block); err != nil {
+		s.logger.Error("failed to store block",
+			zap.String("block_id", blockID.String()),
+			zap.Error(err))
+		return nil, err
+	}
+
+	// Now try to fetch transaction
+	tx, err = s.fetchTransactionFromChain(ctx, hash)
 	if err != nil {
 		s.logger.Error("failed to get transaction",
 			zap.String("hash", hash.Hex()),
 			zap.Error(err))
-		return nil, fmt.Errorf("not found tx %x", hash)
+		return nil, fmt.Errorf("transaction not found: %w", err)
 	}
+
 	return tx, nil
 }
 
@@ -778,4 +800,62 @@ func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Tra
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 	)
+}
+
+func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+	s.logger.Info("fetching transaction from chain",
+		zap.String("hash", hash.Hex()))
+
+	client, release := s.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("failed to get lite client")
+	}
+	defer release()
+
+	info, err := client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	blockID := info.Last.ToBlockIdExt()
+
+	for i := 0; i < 1000; i++ {
+		s.logger.Debug("searching block",
+			zap.String("tx_hash", hash.Hex()),
+			zap.String("block_id", blockID.String()),
+			zap.Int("attempt", i+1))
+
+		// Try to get block from storage first
+		block, err := s.getBlock(blockID)
+		if err != nil {
+			// If not in storage, fetch from chain
+			block, err = s.fetchBlockFromChain(ctx, blockID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get block: %w", err)
+			}
+		}
+
+		for _, tx := range block.AllTransactions() {
+			txHash := tongo.Bits256(tx.Hash())
+			if txHash == hash {
+				transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+					BlockID:     blockID,
+					Transaction: *tx,
+				}, nil)
+				if err != nil {
+					return nil, err
+				}
+
+				if err := s.storeTransaction(hash, transaction); err != nil {
+					return nil, err
+				}
+
+				return transaction, nil
+			}
+		}
+
+		blockID.Seqno--
+	}
+
+	return nil, fmt.Errorf("transaction not found")
 }
