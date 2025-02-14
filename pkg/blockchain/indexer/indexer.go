@@ -72,6 +72,8 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 					Shard:     uint64(tongo.MustParseShardID(-0x8000000000000000).Encode()),
 					Seqno:     info.Last.Seqno,
 				},
+				RootHash: tongo.Bits256(info.Last.RootHash),
+				FileHash: tongo.Bits256(info.Last.FileHash),
 			}, 1)
 			if err != nil {
 				if isBlockNotReadyError(err) || isBlockNotResolved(err) {
