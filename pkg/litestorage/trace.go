@@ -202,11 +202,6 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 			BlockID:     blockIDExt,
 			Transaction: *tx,
 		}, nil)
-
-		if err == nil {
-			// Store transaction in DB
-			err = s.storeTransaction(tongo.Bits256(tx.Hash()), transaction)
-		}
 		s.txMutex.Unlock()
 
 		if err != nil {
@@ -290,38 +285,57 @@ func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bi
 
 	if err != nil {
 		// Try fetching from blockchain if not in DB
-		// return s.fetchTransactionFromChain(ctx, hash)
+		return s.fetchTransactionFromChain(ctx, hash)
 	}
 
 	return tx, nil
 }
 
-// func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-// 	client, release := s.getClient()
-// 	if client == nil {
-// 		return nil, fmt.Errorf("failed to get lite client")
-// 	}
-// 	defer release()
+func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
+	client, release := s.getClient()
+	if client == nil {
+		return nil, fmt.Errorf("failed to get lite client")
+	}
+	defer release()
 
-// 	var tx *tongo.Transaction
-// 	err := retry.Do(func() error {
-// 		var err error
-// 		rawTx, err := client.gettr(ctx, hash)
-// 		if err != nil {
-// 			return err
-// 		}
-// 		tx = rawTx
-// 		return nil
-// 	}, retry.Attempts(3), retry.Delay(time.Second))
+	// Get latest masterchain info
+	info, err := client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
 
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to fetch transaction: %w", err)
-// 	}
+	// Start from latest block and search backwards
+	blockID := info.Last.ToBlockIdExt()
 
-// 	transaction, err := safeConvertTransaction(tx.BlockID.Workchain, *tx, nil)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to convert transaction: %w", err)
-// 	}
+	// Search through recent blocks
+	for i := 0; i < 1000; i++ { // Limit search depth
+		block, err := client.GetBlock(ctx, blockID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block: %w", err)
+		}
 
-// 	return transaction, nil
-// }
+		// Search transactions in block
+		for _, tx := range block.AllTransactions() {
+			txHash := tongo.Bits256(tx.Hash())
+			if txHash == hash {
+				transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+					BlockID:     blockID,
+					Transaction: *tx,
+				}, nil)
+				if err != nil {
+					return nil, err
+				}
+
+				if err := s.storeTransaction(hash, transaction); err != nil {
+					return nil, err
+				}
+
+				return transaction, nil
+			}
+		}
+
+		blockID.Seqno--
+	}
+
+	return nil, fmt.Errorf("transaction not found")
+}

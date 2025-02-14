@@ -335,8 +335,19 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 					zap.Error(err))
 				continue
 			}
-			if err := s.storeTransaction(hash, transaction); err != nil {
-				s.logger.Error("failed to store tx", zap.Error(err))
+			// Add retry for storage
+			err = retry.Do(
+				func() error {
+					return s.storeTransactionWithRetry(hash, transaction)
+				},
+				retry.Attempts(3),
+				retry.Delay(100*time.Millisecond),
+			)
+
+			if err != nil {
+				s.logger.Error("failed to store tx after retries",
+					zap.String("tx-hash", hash.Hex()),
+					zap.Error(err))
 			}
 
 			createLT, ok := extractInMsgCreatedLT(accountID, tx)
@@ -433,7 +444,7 @@ func (s *LiteStorage) preloadAccount(a tongo.AccountID) error {
 		}
 		hash := tongo.Bits256(tx.Hash())
 		// s.transactionsIndexByHash.Store(hash, t)
-		s.storeTransaction(hash, t)
+		s.storeTransactionWithRetry(hash, t)
 		createLT, ok := extractInMsgCreatedLT(a, &tx.Transaction)
 		if ok {
 			// s.transactionsByInMsgLT.Store(createLT, hash)
@@ -471,7 +482,7 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 		}
 		hash := tongo.Bits256(tx.Hash())
 		// s.transactionsIndexByHash.Store(hash, t)
-		s.storeTransaction(hash, t)
+		s.storeTransactionWithRetry(hash, t)
 		createLT, ok := extractInMsgCreatedLT(accountID, tx)
 		if ok {
 			// s.transactionsByInMsgLT.Store(createLT, hash)
@@ -556,7 +567,8 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		storageTimeHistogramVec.WithLabelValues("get_transaction").Observe(v)
 	}))
 	defer timer.ObserveDuration()
-	tx, err := s.getTransaction(hash)
+
+	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("not found tx %x", hash)
 	}
@@ -744,4 +756,14 @@ func safeConvertTransaction(workchain int32, tx tongo.Transaction, cd *abi.Contr
 
 	result, err = core.ConvertTransaction(workchain, tx, cd)
 	return result, err
+}
+
+func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Transaction) error {
+	return retry.Do(
+		func() error {
+			return s.storeTransaction(hash, tx)
+		},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+	)
 }
