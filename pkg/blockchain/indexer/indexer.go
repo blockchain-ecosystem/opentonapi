@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"encoding/hex"
 	"sort"
 	"strings"
 	"time"
@@ -51,11 +52,24 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				continue
 			}
 
+			idx.logger.Debug("masterchain info",
+				zap.Uint32("last_seqno", info.Last.Seqno),
+				zap.String("last_root_hash", hex.EncodeToString(info.Last.RootHash[:])),
+				zap.String("last_file_hash", hex.EncodeToString(info.Last.FileHash[:])))
+
+			// Get current masterchain state
+			_, err = idx.cli.GetMasterchainInfoExt(ctx, 0)
+			if err != nil {
+				idx.logger.Error("failed to get masterchain info ext", zap.Error(err))
+				time.Sleep(time.Second * 5)
+				continue
+			}
+
 			// Check if block is ready and applied
 			_, err = idx.cli.GetBlockHeader(ctx, tongo.BlockIDExt{
 				BlockID: tongo.BlockID{
 					Workchain: -1,
-					Shard:     0x8000000000000000,
+					Shard:     uint64(tongo.MustParseShardID(-0x8000000000000000).Encode()),
 					Seqno:     info.Last.Seqno,
 				},
 			}, 1)
