@@ -302,10 +302,15 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 }
 
 func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
+	s.logger.Info("starting block processing loop before nil check")
 	if ch == nil {
 		s.logger.Error("nil block channel provided")
 		return
 	}
+
+	s.logger.Info("starting block processing loop",
+		zap.Int("channel_capacity", cap(ch)),
+		zap.Int("channel_length", len(ch)))
 
 	for block := range ch {
 		if block.Block == nil {
@@ -315,7 +320,8 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 
 		s.logger.Info("processing block",
 			zap.String("block_id", block.ID.String()),
-			zap.Int("tx_count", len(block.Block.AllTransactions())))
+			zap.Int("tx_count", len(block.Block.AllTransactions())),
+			zap.Int64("seqno", int64(block.ID.Seqno)))
 
 		for _, tx := range block.Block.AllTransactions() {
 			if tx == nil {
@@ -363,6 +369,8 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 			}
 		}
 	}
+
+	s.logger.Info("block processing loop ended")
 }
 
 func (s *LiteStorage) GetContract(ctx context.Context, id tongo.AccountID) (*core.Contract, error) {
