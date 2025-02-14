@@ -26,8 +26,6 @@ import (
 	"github.com/tonkeeper/tongo/ton"
 	"go.uber.org/zap"
 
-	"hash/maphash"
-
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/tonkeeper/opentonapi/pkg/blockchain/indexer"
@@ -325,11 +323,19 @@ func (s *LiteStorage) run(ch <-chan indexer.IDandBlock) {
 			continue
 		}
 
+		// Store block first
 		s.logger.Info("processing block",
 			zap.String("block_id", block.ID.String()),
 			zap.Int("tx_count", len(block.Block.AllTransactions())),
 			zap.Int64("seqno", int64(block.ID.Seqno)))
+		if err := s.storeBlock(block.ID, block.Block); err != nil {
+			s.logger.Error("failed to store block",
+				zap.String("block_id", block.ID.String()),
+				zap.Error(err))
+			continue
+		}
 
+		// Process transactions
 		for _, tx := range block.Block.AllTransactions() {
 			if tx == nil {
 				s.logger.Error("nil transaction in block",
@@ -589,7 +595,12 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	}))
 	defer timer.ObserveDuration()
 
-	tx, err := s.getTransactionWithRetry(ctx, hash)
+	var tx *core.Transaction
+	err := retry.Do(func() error {
+		var err error
+		tx, err = s.getTransaction(hash)
+		return err
+	}, retry.Attempts(3), retry.Delay(100*time.Millisecond))
 	if err != nil {
 		s.logger.Error("failed to get transaction",
 			zap.String("hash", hash.Hex()),
@@ -790,11 +801,4 @@ func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Tra
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 	)
-}
-
-func hashString(seed maphash.Seed, s string) uint64 {
-	var h maphash.Hash
-	h.SetSeed(seed)
-	h.WriteString(s)
-	return h.Sum64()
 }

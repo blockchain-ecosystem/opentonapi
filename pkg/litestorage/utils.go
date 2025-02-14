@@ -7,6 +7,13 @@ import (
 	"github.com/tonkeeper/tongo"
 )
 
+func hashString(seed maphash.Seed, s string) uint64 {
+	var h maphash.Hash
+	h.SetSeed(seed)
+	h.WriteString(s)
+	return h.Sum64()
+}
+
 func hashBlockIDExt(seed maphash.Seed, s tongo.BlockIDExt) uint64 {
 	var h maphash.Hash
 	h.SetSeed(seed)
