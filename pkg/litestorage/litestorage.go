@@ -588,15 +588,18 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	// Try getting from DB first
 	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err == nil {
-		s.logger.Info("found transaction in DB")
+		s.logger.Info("found transaction in DB",
+			zap.String("hash", hash.Hex()))
 		return tx, nil
 	}
-	s.logger.Info("transaction not found in DB, trying workchains")
 
-	// Try workchain 0 first since that's where most transactions are
-	workchains := []int32{0, -1}
+	// Try both workchains
+	workchains := []int32{0, -1} // Try workchain 0 first
 	for _, wc := range workchains {
-		s.logger.Info("trying workchain", zap.Int32("workchain", wc))
+		s.logger.Info("searching in workchain",
+			zap.Int32("workchain", wc),
+			zap.String("hash", hash.Hex()))
+
 		info, err := s.client.GetMasterchainInfo(ctx)
 		if err != nil {
 			s.logger.Error("failed to get masterchain info", zap.Error(err))
@@ -622,9 +625,14 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 				zap.Error(err))
 		}
 
-		// Find and convert the transaction
+		// Search in current block
 		for _, tx := range block.AllTransactions() {
-			if tongo.Bits256(tx.Hash()) == hash {
+			txHash := tongo.Bits256(tx.Hash())
+			if txHash == hash {
+				s.logger.Info("found transaction in block",
+					zap.String("hash", hash.Hex()),
+					zap.String("block_id", blockID.String()))
+
 				transaction, err := safeConvertTransaction(wc, tongo.Transaction{
 					BlockID:     blockID,
 					Transaction: *tx,
@@ -642,7 +650,9 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		}
 	}
 
-	s.logger.Info("transaction not found in recent blocks, trying chain search")
+	// If not found in recent blocks, try searching backwards
+	s.logger.Info("transaction not found in recent blocks, trying chain search",
+		zap.String("hash", hash.Hex()))
 	return s.fetchTransactionFromChain(ctx, hash)
 }
 
@@ -843,60 +853,60 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 	s.logger.Info("fetching transaction from chain",
 		zap.String("hash", hash.Hex()))
 
-	client, release := s.getClient()
-	if client == nil {
-		return nil, fmt.Errorf("failed to get lite client")
-	}
-	defer release()
+	// Try workchain 0 first
+	workchains := []int32{0, -1} // Try workchain 0 first, then masterchain
 
-	info, err := client.GetMasterchainInfo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
-	}
+	for _, wc := range workchains {
+		s.logger.Info("searching in workchain", zap.Int32("workchain", wc))
 
-	blockID := info.Last.ToBlockIdExt()
-
-	for i := 0; i < 1000; i++ {
-		s.logger.Debug("searching block",
-			zap.String("tx_hash", hash.Hex()),
-			zap.String("block_id", blockID.String()),
-			zap.Int("attempt", i+1))
-
-		// Try to get block from storage first
-		block, err := s.getBlock(blockID)
+		info, err := s.client.GetMasterchainInfo(ctx)
 		if err != nil {
-			// If not in storage, fetch from chain
-			block, err = s.fetchBlockFromChain(ctx, blockID)
+			continue
+		}
+
+		blockID := info.Last.ToBlockIdExt()
+		blockID.Workchain = wc
+
+		for i := 0; i < 1000; i++ {
+			s.logger.Debug("searching block",
+				zap.String("tx_hash", hash.Hex()),
+				zap.String("block_id", blockID.String()),
+				zap.Int("attempt", i+1))
+
+			block, err := s.getBlock(blockID)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get block: %w", err)
-			}
-		}
-
-		for _, tx := range block.AllTransactions() {
-			txHash := tongo.Bits256(tx.Hash())
-			if txHash == hash {
-				transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
-					BlockID:     blockID,
-					Transaction: *tx,
-				}, nil)
+				block, err = s.fetchBlockFromChain(ctx, blockID)
 				if err != nil {
-					return nil, err
+					break // Try next workchain
 				}
-
-				if err := s.storeTransaction(hash, transaction); err != nil {
-					return nil, err
-				}
-
-				s.logger.Info("searching block in chain",
-					zap.String("block_id", blockID.String()),
-					zap.Uint32("seqno", blockID.Seqno),
-					zap.Int32("workchain", blockID.Workchain))
-
-				return transaction, nil
 			}
-		}
 
-		blockID.Seqno--
+			for _, tx := range block.AllTransactions() {
+				txHash := tongo.Bits256(tx.Hash())
+				if txHash == hash {
+					transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+						BlockID:     blockID,
+						Transaction: *tx,
+					}, nil)
+					if err != nil {
+						return nil, err
+					}
+
+					if err := s.storeTransaction(hash, transaction); err != nil {
+						return nil, err
+					}
+
+					s.logger.Info("searching block in chain",
+						zap.String("block_id", blockID.String()),
+						zap.Uint32("seqno", blockID.Seqno),
+						zap.Int32("workchain", blockID.Workchain))
+
+					return transaction, nil
+				}
+			}
+
+			blockID.Seqno--
+		}
 	}
 
 	return nil, fmt.Errorf("transaction not found")
