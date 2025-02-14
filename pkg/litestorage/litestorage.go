@@ -490,11 +490,24 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 		storageTimeHistogramVec.WithLabelValues("get_masterchain").Observe(v)
 	}))
 	defer timer.ObserveDuration()
+
 	info, err := s.client.GetMasterchainInfo(ctx)
 	if err != nil {
+		s.logger.Error("failed to get masterchain info",
+			zap.Error(err))
 		return nil, err
 	}
-	return s.GetBlockHeader(ctx, info.Last.ToBlockIdExt().BlockID)
+
+	blockID := info.Last.ToBlockIdExt().BlockID
+	header, err := s.GetBlockHeader(ctx, blockID)
+	if err != nil {
+		s.logger.Error("failed to get block header",
+			zap.String("block_id", blockID.String()),
+			zap.Error(err))
+		return nil, err
+	}
+
+	return header, nil
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {

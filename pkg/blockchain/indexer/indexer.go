@@ -89,8 +89,10 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 
 			idx.logger.Info("lite server synced",
 				zap.Uint32("seqno", info.Last.Seqno))
-			break
+
+			return
 		}
+		break
 	}
 
 	// Process blocks with backoff
