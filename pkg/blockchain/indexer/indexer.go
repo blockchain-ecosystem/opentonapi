@@ -51,25 +51,29 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				continue
 			}
 
-			// Get current masterchain state
-			state, err := idx.cli.GetMasterchainInfoExt(ctx, 0)
+			// Check if block is ready and applied
+			_, err = idx.cli.GetBlockHeader(ctx, tongo.BlockIDExt{
+				BlockID: tongo.BlockID{
+					Workchain: -1,
+					Shard:     0x8000000000000000,
+					Seqno:     info.Last.Seqno,
+				},
+			}, 1)
 			if err != nil {
-				idx.logger.Error("failed to get masterchain state", zap.Error(err))
+				if isBlockNotReadyError(err) || isBlockNotResolved(err) {
+					idx.logger.Warn("waiting for block to be applied",
+						zap.Uint32("seqno", info.Last.Seqno))
+					time.Sleep(time.Second * 5)
+					continue
+				}
+				idx.logger.Error("failed to get block header", zap.Error(err))
 				time.Sleep(time.Second * 5)
 				continue
 			}
 
-			if state.Last.Seqno-info.Last.Seqno < 10 {
-				idx.logger.Info("lite server synced",
-					zap.Uint32("current_seqno", state.Last.Seqno),
-					zap.Uint32("last_known_seqno", info.Last.Seqno))
-				break
-			}
-
-			idx.logger.Warn("waiting for lite server to sync",
-				zap.Uint32("current_seqno", state.Last.Seqno),
-				zap.Uint32("last_known_seqno", info.Last.Seqno))
-			time.Sleep(time.Second * 10)
+			idx.logger.Info("lite server synced",
+				zap.Uint32("seqno", info.Last.Seqno))
+			break
 		}
 	}
 
