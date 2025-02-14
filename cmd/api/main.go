@@ -44,12 +44,12 @@ func main() {
 
 	var err error
 	var client *liteapi.Client
-	if len(cfg.App.LiteServers) == 0 {
-		log.Warn("USING PUBLIC CONFIG for NewLiteStorage! BE CAREFUL!")
-		client, err = liteapi.NewClientWithDefaultMainnet()
-	} else {
-		client, err = liteapi.NewClient(liteapi.WithLiteServers(cfg.App.LiteServers))
-	}
+	// if len(cfg.App.LiteServers) == 0 {
+	log.Warn("USING PUBLIC CONFIG for NewLiteStorage! BE CAREFUL!")
+	client, err = liteapi.NewClientWithDefaultMainnet()
+	// } else {
+	// 	client, err = liteapi.NewClient(liteapi.WithLiteServers(cfg.App.LiteServers))
+	// }
 	if err != nil {
 		log.Fatal("failed to create liteapi client", zap.Error(err))
 	}
