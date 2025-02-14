@@ -606,6 +606,8 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		}
 
 		blockID := info.Last.ToBlockIdExt()
+		s.logger.Info("searching in",
+			zap.String("block_id", blockID.String()))
 		blockID.Workchain = wc
 
 		block, err := s.client.GetBlock(ctx, blockID)
