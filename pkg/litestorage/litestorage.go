@@ -902,7 +902,13 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 			RootHash: masterBlock.RootHash,
 			FileHash: masterBlock.FileHash,
 		}
-		block, err := s.client.GetBlock(ctx, blockIDExt)
+
+		blockID, _, err := s.client.LookupBlock(ctx, shard.BlockID, 1, nil, nil)
+		if err != nil {
+			continue
+		}
+
+		block, err := s.client.GetBlock(ctx, blockID)
 		if err != nil {
 			// s.logger.Error("failed to get shard block", zap.Error(err))
 			continue
