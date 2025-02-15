@@ -573,7 +573,7 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	// Try getting from DB first
 	tx, err := s.getTransactionWithRetry(ctx, hash)
 	if err == nil {
-		s.logger.Info("found transaction in DB")
+		// s.logger.Info("found transaction in DB")
 		return tx, nil
 	}
 
@@ -658,7 +658,7 @@ func (s *LiteStorage) GetBlockTransactions(ctx context.Context, id tongo.BlockID
 	if err != nil {
 		return nil, err
 	}
-	return core.ExtractTransactions(blockID, &block)
+	return core.ExtractTransactions(s.logger, blockID, &block)
 }
 
 func (s *LiteStorage) searchTxInCache(a tongo.AccountID, lt uint64) *core.Transaction {
