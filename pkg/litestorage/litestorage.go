@@ -898,7 +898,7 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 			zap.String("master_block", masterBlock.String()))
 
 		blockIDExt := tongo.BlockIDExt{
-			BlockID: shard.BlockID,
+			BlockID:  shard.BlockID,
 			RootHash: masterBlock.RootHash,
 			FileHash: masterBlock.FileHash,
 		}
