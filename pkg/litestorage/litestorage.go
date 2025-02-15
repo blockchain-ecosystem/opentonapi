@@ -164,14 +164,14 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 	}
 
 	badgerOpts := badger.DefaultOptions("./badger").
-		WithValueLogFileSize(1 << 30).   // 1GB value logs
+		WithValueLogFileSize(4 << 30).   // 4GB value logs
 		WithNumVersionsToKeep(1).        // Single version
 		WithCompression(options.Snappy). // Enable compression
-		WithNumGoroutines(16).           // More concurrent processing
+		WithNumGoroutines(32).           // More concurrent processing
 		WithValueThreshold(32).          // Optimize for larger values
-		WithBlockCacheSize(8 << 30).     // 8GB block cache
-		WithIndexCacheSize(16 << 30).    // 16GB index cache
-		WithMemTableSize(512 << 20)      // 512MB memtable
+		WithBlockCacheSize(32 << 30).    // 32GB block cache
+		WithIndexCacheSize(64 << 30).    // 64GB index cache
+		WithMemTableSize(1 << 30)        // 1GB memtable
 
 	db, err := badger.Open(badgerOpts)
 	if err != nil {
@@ -927,13 +927,10 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 }
 
 func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *tlb.Block) error {
+	txBatch := make([]*core.Transaction, 0, len(block.AllTransactions()))
+
 	for _, tx := range block.AllTransactions() {
 		hash := tongo.Bits256(tx.Hash())
-		// accountID := tongo.AccountID{
-		// 	Workchain: blockID.Workchain,
-		// 	Address:   tx.AccountAddr,
-		// }
-
 		transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
 			BlockID:     blockID,
 			Transaction: *tx,
@@ -944,20 +941,23 @@ func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *
 				zap.Error(err))
 			continue
 		}
-
-		if err := s.storeTransaction(hash, transaction); err != nil {
-			s.logger.Error("failed to store transaction",
-				zap.String("hash", hash.Hex()),
-				zap.Error(err))
-			continue
-		}
-
-		// s.logger.Info("stored transaction",
-		// 	zap.String("hash", hash.Hex()),
-		// 	zap.String("block_id", blockID.String()),
-		// 	zap.String("account", accountID.String()))
+		txBatch = append(txBatch, transaction)
 	}
-	return nil
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, tx := range txBatch {
+			hash := tx.Hash
+			data, err := json.Marshal(tx)
+			if err != nil {
+				return fmt.Errorf("failed to marshal transaction: %w", err)
+			}
+			key := append([]byte(txKeyPrefix), hash[:]...)
+			if err := txn.Set(key, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *LiteStorage) findTransactionInBlock(block *tlb.Block, blockID tongo.BlockIDExt, hash tongo.Bits256) *core.Transaction {

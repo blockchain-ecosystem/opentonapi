@@ -136,6 +136,9 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 	}
 
 	lastSeqno := chunk.masterID.Seqno + 1
+	const batchSize = 100
+	blocks := make([]IDandBlock, 0, batchSize)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,20 +151,21 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				continue
 			}
 
-			// Process blocks in parallel
-			for _, block := range chunk.blocks {
-				for _, ch := range channels {
-					select {
-					case ch <- block:
-						idx.logger.Debug("sent block to channel",
-							zap.String("block_id", block.ID.String()))
-					case <-ctx.Done():
-						return
-					case <-time.After(5 * time.Second):
-						idx.logger.Warn("channel full, skipping block",
-							zap.String("block_id", block.ID.String()))
+			blocks = append(blocks, chunk.blocks...)
+
+			if len(blocks) >= batchSize {
+				// Process batch in parallel
+				iter.ForEach(blocks, func(block *IDandBlock) {
+					for _, ch := range channels {
+						select {
+						case ch <- *block:
+						case <-time.After(time.Second):
+							idx.logger.Warn("channel full, skipping block",
+								zap.String("block_id", block.ID.String()))
+						}
 					}
-				}
+				})
+				blocks = blocks[:0]
 			}
 
 			lastSeqno = chunk.masterID.Seqno + 1
@@ -324,11 +328,14 @@ func (idx *Indexer) monitorChannel(ctx context.Context, ch chan IDandBlock, inde
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if len(ch) > cap(ch)*80/100 {
-				idx.logger.Warn("channel near capacity",
-					zap.Int("channel_index", index),
-					zap.Int("current", len(ch)),
-					zap.Int("capacity", cap(ch)))
+			usage := float64(len(ch)) / float64(cap(ch))
+			switch {
+			case usage > 0.9:
+				time.Sleep(time.Second * 2)
+			case usage > 0.8:
+				time.Sleep(time.Second)
+			case usage > 0.7:
+				time.Sleep(time.Millisecond * 500)
 			}
 		}
 	}

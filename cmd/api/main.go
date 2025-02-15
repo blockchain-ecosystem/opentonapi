@@ -39,8 +39,8 @@ func main() {
 	cfg := config.Load()
 	log := app.Logger(cfg.App.LogLevel)
 
-	storageBlockCh := make(chan indexer.IDandBlock, 5000)
-	pusherBlockCh := make(chan indexer.IDandBlock, 5000)
+	storageBlockCh := make(chan indexer.IDandBlock, 15000)
+	pusherBlockCh := make(chan indexer.IDandBlock, 15000)
 
 	var err error
 	var client *liteapi.Client
