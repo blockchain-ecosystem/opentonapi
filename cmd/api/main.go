@@ -60,13 +60,16 @@ func main() {
 		litestorage.WithPreloadAccounts(cfg.App.Accounts),
 		litestorage.WithBlockChannel(storageBlockCh),
 	)
-	book := addressbook.NewAddressBook(log, config.AddressPath, config.JettonPath, config.CollectionPath, storage)
-	// The executor is used to resolve DNS records.
-	tongo.SetDefaultExecutor(storage)
-
 	if err != nil {
 		log.Fatal("storage init", zap.Error(err))
 	}
+
+	// Only create AddressBook after successful storage initialization
+	book := addressbook.NewAddressBook(log, config.AddressPath, config.JettonPath, config.CollectionPath, storage)
+
+	// The executor is used to resolve DNS records.
+	tongo.SetDefaultExecutor(storage)
+
 	// mempool receives a copy of any payload that goes through our API method /v2/blockchain/message
 	mempool := sources.NewMemPool(log)
 	mempoolCh := mempool.Run(ctx)
