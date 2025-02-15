@@ -228,6 +228,11 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		s.connPool.Put(cli)
 	}
 
+	// Start background tasks
+	go s.startBlockCleanup(ctx)
+	// go s.startTransactionCleanup(ctx)
+	// go s.startTransactionConversion(ctx)
+
 	return s, nil
 }
 
