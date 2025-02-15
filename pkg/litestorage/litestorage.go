@@ -341,63 +341,84 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 }
 
 func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
-	return retry.Do(func() error {
-		return s.db.Update(func(txn *badger.Txn) error {
-			// Store block first
-			blockData, err := json.Marshal(block.Block)
+	s.logger.Info("starting block processing",
+		zap.String("block_id", block.ID.String()))
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		// Store block first
+		blockData, err := json.Marshal(block.Block)
+		if err != nil {
+			return fmt.Errorf("failed to marshal block: %w", err)
+		}
+
+		blockKey := append([]byte(blockKeyPrefix), []byte(block.ID.String())...)
+		if err := txn.Set(blockKey, blockData); err != nil {
+			return fmt.Errorf("failed to store block: %w", err)
+		}
+
+		s.logger.Info("stored block",
+			zap.String("block_id", block.ID.String()),
+			zap.Int("transactions_count", len(block.Block.AllTransactions())))
+
+		// Process all transactions
+		for _, tx := range block.Block.AllTransactions() {
+			accountID := tongo.AccountID{
+				Workchain: block.ID.Workchain,
+				Address:   tx.AccountAddr,
+			}
+
+			hash := tongo.Bits256(tx.Hash())
+			s.logger.Debug("processing transaction",
+				zap.String("hash", hash.Hex()),
+				zap.String("block_id", block.ID.String()),
+				zap.String("account", accountID.String()))
+
+			transaction, err := safeConvertTransaction(block.ID.Workchain, tongo.Transaction{
+				BlockID:     block.ID,
+				Transaction: *tx,
+			}, nil)
 			if err != nil {
-				return fmt.Errorf("failed to marshal block: %w", err)
+				s.logger.Error("failed to convert transaction",
+					zap.String("hash", hash.Hex()),
+					zap.String("block_id", block.ID.String()),
+					zap.Error(err))
+				return fmt.Errorf("failed to convert transaction %s: %w", hash.Hex(), err)
 			}
 
-			blockKey := append([]byte(blockKeyPrefix), []byte(block.ID.String())...)
-			if err := txn.Set(blockKey, blockData); err != nil {
-				return fmt.Errorf("failed to store block: %w", err)
+			// Store transaction
+			txData, err := json.Marshal(transaction)
+			if err != nil {
+				return fmt.Errorf("failed to marshal transaction %s: %w", hash.Hex(), err)
 			}
 
-			// Process all transactions
-			for _, tx := range block.Block.AllTransactions() {
-				accountID := tongo.AccountID{
-					Workchain: block.ID.Workchain,
-					Address:   tx.AccountAddr,
-				}
-
-				transaction, err := safeConvertTransaction(block.ID.Workchain, tongo.Transaction{
-					BlockID:     block.ID,
-					Transaction: *tx,
-				}, nil)
-				if err != nil {
-					return fmt.Errorf("failed to convert transaction %s: %w", tx.Hash().Hex(), err)
-				}
-
-				// Store transaction
-				hash := tongo.Bits256(tx.Hash())
-				txData, err := json.Marshal(transaction)
-				if err != nil {
-					return fmt.Errorf("failed to marshal transaction %s: %w", hash.Hex(), err)
-				}
-
-				txKey := append([]byte(txKeyPrefix), hash[:]...)
-				if err := txn.Set(txKey, txData); err != nil {
-					return fmt.Errorf("failed to store transaction %s: %w", hash.Hex(), err)
-				}
-
-				// Store with TTL to prevent immediate cleanup
-				entry := badger.NewEntry(txKey, txData).WithTTL(24 * time.Hour)
-				if err := txn.SetEntry(entry); err != nil {
-					return fmt.Errorf("failed to store transaction %s: %w", hash.Hex(), err)
-				}
-
-				// Store LT index if needed
-				if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
-					ltKey := []byte("lt_" + accountID.String() + "_" + fmt.Sprint(createLT.lt))
-					if err := txn.SetEntry(badger.NewEntry(ltKey, hash[:]).WithMeta(0x01)); err != nil {
-						return fmt.Errorf("failed to store LT index for tx %s: %w", hash.Hex(), err)
-					}
-				}
+			txKey := append([]byte(txKeyPrefix), hash[:]...)
+			if err := txn.Set(txKey, txData); err != nil {
+				return fmt.Errorf("failed to store transaction %s: %w", hash.Hex(), err)
 			}
-			return nil
-		})
-	}, retry.Attempts(3), retry.Delay(100*time.Millisecond))
+
+			s.logger.Info("stored transaction",
+				zap.String("hash", hash.Hex()),
+				zap.String("block_id", block.ID.String()),
+				zap.String("account", accountID.String()),
+				zap.Uint64("lt", transaction.Lt))
+
+			// Store LT index if needed
+			if createLT, ok := extractInMsgCreatedLT(accountID, tx); ok {
+				ltKey := []byte("lt_" + accountID.String() + "_" + fmt.Sprint(createLT.lt))
+				if err := txn.SetEntry(badger.NewEntry(ltKey, hash[:]).WithMeta(0x01)); err != nil {
+					return fmt.Errorf("failed to store LT index for tx %s: %w", hash.Hex(), err)
+				}
+				s.logger.Debug("stored LT index",
+					zap.String("hash", hash.Hex()),
+					zap.String("account", accountID.String()),
+					zap.Uint64("lt", createLT.lt))
+			}
+		}
+
+		s.logger.Info("completed block processing",
+			zap.String("block_id", block.ID.String()))
+		return nil
+	})
 }
 
 func (s *LiteStorage) GetContract(ctx context.Context, id tongo.AccountID) (*core.Contract, error) {
@@ -862,54 +883,57 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 	s.logger.Info("fetching transaction from chain",
 		zap.String("hash", hash.Hex()))
 
-	// Try workchain 0 first
-	workchains := []int32{0, -1} // Try workchain 0 first, then masterchain
+	workchains := []int32{0, -1}
 
 	for _, wc := range workchains {
 		s.logger.Info("searching in workchain", zap.Int32("workchain", wc))
 
 		info, err := s.client.GetMasterchainInfo(ctx)
 		if err != nil {
+			s.logger.Error("failed to get masterchain info", zap.Error(err))
 			continue
 		}
 
 		blockID := info.Last.ToBlockIdExt()
 		blockID.Workchain = wc
 
-		for i := 0; i < 1000; i++ {
-			s.logger.Debug("searching block",
-				zap.String("tx_hash", hash.Hex()),
-				zap.String("block_id", blockID.String()),
-				zap.Int("attempt", i+1))
-
+		// Increase search depth
+		for i := 0; i < 10000; i++ {
 			block, err := s.getBlock(blockID)
 			if err != nil {
 				block, err = s.fetchBlockFromChain(ctx, blockID)
 				if err != nil {
-					break // Try next workchain
+					s.logger.Error("failed to fetch block",
+						zap.String("block_id", blockID.String()),
+						zap.Error(err))
+					continue // Continue to next block instead of breaking
 				}
 			}
 
+			// Store block transactions
 			for _, tx := range block.AllTransactions() {
 				txHash := tongo.Bits256(tx.Hash())
+
+				// Store all transactions from block
+				transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+					BlockID:     blockID,
+					Transaction: *tx,
+				}, nil)
+				if err != nil {
+					s.logger.Error("failed to convert transaction",
+						zap.String("hash", txHash.Hex()),
+						zap.Error(err))
+					continue
+				}
+
+				// Store with TTL
+				if err := s.storeTransaction(txHash, transaction); err != nil {
+					s.logger.Error("failed to store transaction",
+						zap.String("hash", txHash.Hex()),
+						zap.Error(err))
+				}
+
 				if txHash == hash {
-					transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
-						BlockID:     blockID,
-						Transaction: *tx,
-					}, nil)
-					if err != nil {
-						return nil, err
-					}
-
-					if err := s.storeTransaction(hash, transaction); err != nil {
-						return nil, err
-					}
-
-					s.logger.Info("searching block in chain",
-						zap.String("block_id", blockID.String()),
-						zap.Uint32("seqno", blockID.Seqno),
-						zap.Int32("workchain", blockID.Workchain))
-
 					return transaction, nil
 				}
 			}
