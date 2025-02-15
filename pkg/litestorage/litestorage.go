@@ -276,9 +276,9 @@ func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, err
 	var tx core.Transaction
 	key := append([]byte(txKeyPrefix), hash[:]...)
 
-	s.logger.Debug("getting transaction with key",
-		zap.String("key", hex.EncodeToString(key)),
-		zap.String("hash", hash.Hex()))
+	// s.logger.Debug("getting transaction with key",
+	// 	zap.String("key", hex.EncodeToString(key)),
+	// 	zap.String("hash", hash.Hex()))
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(key)
@@ -567,8 +567,8 @@ func (s *LiteStorage) LastMasterchainBlockHeader(ctx context.Context) (*core.Blo
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Info("starting transaction lookup",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("starting transaction lookup",
+	// 	zap.String("hash", hash.Hex()))
 
 	// Try getting from DB first
 	tx, err := s.getTransactionWithRetry(ctx, hash)
@@ -580,12 +580,12 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	// Try both workchains
 	// workchains := []int32{0, -1} // Try workchain 0 first
 	// for _, wc := range workchains {
-	s.logger.Info("searching in workchain",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("searching in workchain",
+	// 	zap.String("hash", hash.Hex()))
 
 	info, err := s.client.GetMasterchainInfo(ctx)
 	if err != nil {
-		s.logger.Error("failed to get masterchain info", zap.Error(err))
+		// s.logger.Error("failed to get masterchain info", zap.Error(err))
 		return nil, err
 	}
 
@@ -596,9 +596,9 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 	block, err := s.client.GetBlock(ctx, blockID)
 	if err != nil {
-		s.logger.Error("failed to get block",
-			zap.String("block_id", blockID.String()),
-			zap.Error(err))
+		// s.logger.Error("failed to get block",
+		// 	zap.String("block_id", blockID.String()),
+		// 	zap.Error(err))
 		return nil, err
 	}
 
@@ -623,8 +623,8 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 	// }
 
 	// If not found in recent blocks, try chain search
-	s.logger.Info("transaction not found in recent blocks, trying chain search",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("transaction not found in recent blocks, trying chain search",
+	// 	zap.String("hash", hash.Hex()))
 	return s.fetchTransactionFromChain(ctx, hash)
 }
 
@@ -886,9 +886,9 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.BlockIDExt) error {
 	shards, err := s.client.GetAllShardsInfo(ctx, masterBlock)
 	if err != nil {
-		s.logger.Error("failed to get shard blocks",
-			zap.String("master_block", masterBlock.String()),
-			zap.Error(err))
+		// s.logger.Error("failed to get shard blocks",
+		// 	zap.String("master_block", masterBlock.String()),
+		// 	zap.Error(err))
 		return err
 	}
 
@@ -904,7 +904,7 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 		}
 		block, err := s.client.GetBlock(ctx, blockIDExt)
 		if err != nil {
-			s.logger.Error("failed to get shard block", zap.Error(err))
+			// s.logger.Error("failed to get shard block", zap.Error(err))
 			continue
 		}
 

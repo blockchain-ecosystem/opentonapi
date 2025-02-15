@@ -34,8 +34,8 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("storage is nil")
 	}
 
-	s.logger.Info("starting GetTrace",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("starting GetTrace",
+	// 	zap.String("hash", hash.Hex()))
 
 	if s.db == nil {
 		s.logger.Error("database is not initialized")
@@ -54,8 +54,8 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 	}))
 	defer timer.ObserveDuration()
 
-	s.logger.Info("getting transaction",
-		zap.String("hash", hash.Hex()))
+	// s.logger.Info("getting transaction",
+	// 	zap.String("hash", hash.Hex()))
 	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
 		s.logger.Error("failed to get transaction",
