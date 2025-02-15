@@ -45,9 +45,9 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 		return
 	}
 
-	idx.logger.Info("indexer starting",
-		zap.Int("channel_count", len(channels)),
-		zap.Int("first_channel_capacity", cap(channels[0])))
+	// idx.logger.Info("indexer starting",
+	// 	zap.Int("channel_count", len(channels)),
+	// 	zap.Int("first_channel_capacity", cap(channels[0])))
 
 	// Add buffer monitoring
 	for i, ch := range channels {
@@ -60,9 +60,9 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 		return
 	}
 
-	idx.logger.Info("initial chunk created",
-		zap.String("master_id", chunk.masterID.String()),
-		zap.Int("block_count", len(chunk.blocks)))
+	// idx.logger.Info("initial chunk created",
+	// 	zap.String("master_id", chunk.masterID.String()),
+	// 	zap.Int("block_count", len(chunk.blocks)))
 
 	// Wait for initial sync
 	for {
@@ -112,8 +112,8 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 				continue
 			}
 
-			idx.logger.Info("lite server synced",
-				zap.Uint32("seqno", info.Last.Seqno))
+			// idx.logger.Info("lite server synced",
+			// 	zap.Uint32("seqno", info.Last.Seqno))
 
 			// Process initial chunk blocks
 			for _, block := range chunk.blocks {

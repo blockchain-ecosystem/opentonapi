@@ -64,7 +64,7 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
-	s.logger.Info("finding root transaction")
+	// s.logger.Info("finding root transaction")
 	root, err := s.findRoot(ctx, tx, 0)
 	if err != nil {
 		s.logger.Error("failed to find root transaction",
@@ -72,7 +72,7 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to find root transaction: %w", err)
 	}
 
-	s.logger.Info("getting children recursively")
+	// s.logger.Info("getting children recursively")
 	trace, err := s.recursiveGetChildren(ctx, *root, 0)
 	if err != nil {
 		s.logger.Error("failed to get children recursively",
@@ -80,7 +80,7 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get children recursively: %w", err)
 	}
 
-	s.logger.Info("GetTrace completed successfully")
+	// s.logger.Info("GetTrace completed successfully")
 	return &trace, nil
 }
 
@@ -331,8 +331,8 @@ func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bi
 
 	// Only fetch from chain if not found in DB
 	if err == badger.ErrKeyNotFound {
-		s.logger.Info("transaction not found in DB, fetching from chain",
-			zap.String("hash", hash.Hex()))
+		// s.logger.Info("transaction not found in DB, fetching from chain",
+		// 	zap.String("hash", hash.Hex()))
 		return s.fetchTransactionFromChain(ctx, hash)
 	}
 

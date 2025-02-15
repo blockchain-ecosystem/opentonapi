@@ -320,7 +320,7 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 }
 
 func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
-	s.logger.Info("starting block processing loop")
+	// s.logger.Info("starting block processing loop")
 
 	for block := range ch {
 		// Validate block
@@ -341,8 +341,8 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 }
 
 func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
-	s.logger.Info("starting block processing",
-		zap.String("block_id", block.ID.String()))
+	// s.logger.Info("starting block processing",
+	// zap.String("block_id", block.ID.String()))
 
 	// Store master block
 	if err := s.storeBlock(block.ID, block.Block); err != nil {
@@ -822,7 +822,7 @@ func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Tra
 }
 
 func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Info("fetching transaction from chain", zap.String("hash", hash.Hex()))
+	// s.logger.Info("fetching transaction from chain", zap.String("hash", hash.Hex()))
 
 	for _, wc := range []int32{0, -1} {
 		info, err := s.client.GetMasterchainInfo(ctx)
@@ -893,9 +893,9 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 	}
 
 	for _, shard := range shards {
-		s.logger.Info("processing shard block",
-			zap.String("shard_block", shard.BlockID.String()),
-			zap.String("master_block", masterBlock.String()))
+		// s.logger.Info("processing shard block",
+		// 	zap.String("shard_block", shard.BlockID.String()),
+		// 	zap.String("master_block", masterBlock.String()))
 
 		blockIDExt := tongo.BlockIDExt{
 			BlockID:  shard.BlockID,
@@ -923,10 +923,10 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *tlb.Block) error {
 	for _, tx := range block.AllTransactions() {
 		hash := tongo.Bits256(tx.Hash())
-		accountID := tongo.AccountID{
-			Workchain: blockID.Workchain,
-			Address:   tx.AccountAddr,
-		}
+		// accountID := tongo.AccountID{
+		// 	Workchain: blockID.Workchain,
+		// 	Address:   tx.AccountAddr,
+		// }
 
 		transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
 			BlockID:     blockID,
@@ -946,10 +946,10 @@ func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *
 			continue
 		}
 
-		s.logger.Info("stored transaction",
-			zap.String("hash", hash.Hex()),
-			zap.String("block_id", blockID.String()),
-			zap.String("account", accountID.String()))
+		// s.logger.Info("stored transaction",
+		// 	zap.String("hash", hash.Hex()),
+		// 	zap.String("block_id", blockID.String()),
+		// 	zap.String("account", accountID.String()))
 	}
 	return nil
 }
