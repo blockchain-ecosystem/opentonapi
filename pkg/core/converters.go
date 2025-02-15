@@ -10,6 +10,7 @@ import (
 	"github.com/tonkeeper/tongo/boc"
 	"github.com/tonkeeper/tongo/tlb"
 	"github.com/tonkeeper/tongo/ton"
+	"go.uber.org/zap"
 
 	"github.com/tonkeeper/opentonapi/internal/g"
 )
@@ -487,6 +488,9 @@ func extractExtraCurrencies(extraCurrencyCollection tlb.ExtraCurrencyCollection)
 }
 
 func ExtractTransactions(id tongo.BlockIDExt, block *tlb.Block) ([]*Transaction, error) {
+	zap.L().Info("extracting transactions from block",
+		zap.String("block_id", id.String()))
+
 	rawTransactions := block.AllTransactions()
 	transactions := make([]*Transaction, 0, len(rawTransactions))
 	for _, rawTx := range rawTransactions {
