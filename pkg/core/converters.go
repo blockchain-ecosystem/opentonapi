@@ -487,8 +487,8 @@ func extractExtraCurrencies(extraCurrencyCollection tlb.ExtraCurrencyCollection)
 	return nil
 }
 
-func ExtractTransactions(id tongo.BlockIDExt, block *tlb.Block) ([]*Transaction, error) {
-	zap.L().Info("extracting transactions from block",
+func ExtractTransactions(logger *zap.Logger, id tongo.BlockIDExt, block *tlb.Block) ([]*Transaction, error) {
+	logger.Info("extracting transactions from block",
 		zap.String("block_id", id.String()))
 
 	rawTransactions := block.AllTransactions()
