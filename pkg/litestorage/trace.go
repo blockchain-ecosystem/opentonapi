@@ -30,34 +30,58 @@ var (
 )
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	// s.logger.Info("getting trace",
-	// 	zap.String("hash", hash.Hex()))
-
 	if s == nil {
 		return nil, fmt.Errorf("storage is nil")
 	}
+
+	s.logger.Info("starting GetTrace",
+		zap.String("hash", hash.Hex()))
+
 	if s.db == nil {
+		s.logger.Error("database is not initialized")
 		return nil, fmt.Errorf("database is not initialized")
 	}
 	if s.client == nil {
+		s.logger.Error("lite client not initialized")
 		return nil, fmt.Errorf("lite client not initialized")
 	}
+
 	ctx, cancel := s.withTimeout(ctx)
 	defer cancel()
+
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
 		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
 	}))
 	defer timer.ObserveDuration()
+
+	s.logger.Info("getting transaction",
+		zap.String("hash", hash.Hex()))
 	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
-		return nil, err
+		s.logger.Error("failed to get transaction",
+			zap.String("hash", hash.Hex()),
+			zap.Error(err))
+		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
+
+	s.logger.Info("finding root transaction")
 	root, err := s.findRoot(ctx, tx, 0)
 	if err != nil {
-		return nil, err
+		s.logger.Error("failed to find root transaction",
+			zap.Error(err))
+		return nil, fmt.Errorf("failed to find root transaction: %w", err)
 	}
+
+	s.logger.Info("getting children recursively")
 	trace, err := s.recursiveGetChildren(ctx, *root, 0)
-	return &trace, err
+	if err != nil {
+		s.logger.Error("failed to get children recursively",
+			zap.Error(err))
+		return nil, fmt.Errorf("failed to get children recursively: %w", err)
+	}
+
+	s.logger.Info("GetTrace completed successfully")
+	return &trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
@@ -273,32 +297,45 @@ func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bi
 	s.logger.Debug("attempting to get transaction from DB",
 		zap.String("hash", hash.Hex()))
 
-	s.txMutex.RLock()
-	defer s.txMutex.RUnlock()
+	// Try DB first with shorter lock scope
+	tx, err := func() (*core.Transaction, error) {
+		s.txMutex.RLock()
+		defer s.txMutex.RUnlock()
 
-	var tx *core.Transaction
-	err := s.db.View(func(txn *badger.Txn) error {
-		key := append([]byte("tx:"), hash[:]...)
-		item, err := txn.Get(key)
-		if err != nil {
-			s.logger.Debug("transaction not found in DB",
-				zap.String("hash", hash.Hex()),
-				zap.Error(err))
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &tx)
+		var tx core.Transaction
+		err := s.db.View(func(txn *badger.Txn) error {
+			key := append([]byte("tx:"), hash[:]...)
+			item, err := txn.Get(key)
+			if err != nil {
+				if err == badger.ErrKeyNotFound {
+					return err
+				}
+				return fmt.Errorf("db error: %w", err)
+			}
+			return item.Value(func(val []byte) error {
+				return json.Unmarshal(val, &tx)
+			})
 		})
-	})
+		if err != nil {
+			return nil, err
+		}
+		return &tx, nil
+	}()
 
-	if err != nil {
-		s.logger.Info("fetching transaction from chain",
+	// If found in DB, return it
+	if err == nil {
+		s.logger.Debug("transaction found in DB",
+			zap.String("hash", hash.Hex()))
+		return tx, nil
+	}
+
+	// Only fetch from chain if not found in DB
+	if err == badger.ErrKeyNotFound {
+		s.logger.Info("transaction not found in DB, fetching from chain",
 			zap.String("hash", hash.Hex()))
 		return s.fetchTransactionFromChain(ctx, hash)
 	}
 
-	s.logger.Debug("transaction found in DB",
-		zap.String("hash", hash.Hex()))
-	return tx, nil
+	// Return other DB errors
+	return nil, fmt.Errorf("failed to get transaction: %w", err)
 }
