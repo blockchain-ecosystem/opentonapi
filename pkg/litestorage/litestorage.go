@@ -164,7 +164,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 	}
 
 	badgerOpts := badger.DefaultOptions("./badger").
-		WithValueLogFileSize(4 << 30).   // 4GB value logs
+		WithValueLogFileSize(2 << 30).   // 4GB value logs
 		WithNumVersionsToKeep(1).        // Single version
 		WithCompression(options.Snappy). // Enable compression
 		WithNumGoroutines(32).           // More concurrent processing
