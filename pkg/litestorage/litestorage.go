@@ -364,7 +364,7 @@ func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction)
 	}
 
 	key := append([]byte(txKeyPrefix), hash[:]...)
-	s.logger.Debug("storing transaction with key",
+	s.logger.Info("storing transaction with key",
 		zap.String("key", hex.EncodeToString(key)),
 		zap.String("hash", hash.Hex()))
 
@@ -380,7 +380,7 @@ func (s *LiteStorage) getTransaction(hash tongo.Bits256) (*core.Transaction, err
 	var tx core.Transaction
 	key := append([]byte(txKeyPrefix), hash[:]...)
 
-	// s.logger.Debug("getting transaction with key",
+	// s.logger.Info("getting transaction with key",
 	// 	zap.String("key", hex.EncodeToString(key)),
 	// 	zap.String("hash", hash.Hex()))
 
@@ -1113,7 +1113,7 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 		zap.String("master_block", masterBlock.String()))
 
 	for i, shard := range shards {
-		s.logger.Debug("processing shard block",
+		s.logger.Info("processing shard block",
 			zap.Int("shard_index", i),
 			zap.String("shard_block", shard.BlockID.String()),
 			zap.String("master_block", masterBlock.String()))
@@ -1142,7 +1142,7 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 			continue
 		}
 
-		s.logger.Debug("successfully processed shard block",
+		s.logger.Info("successfully processed shard block",
 			zap.String("shard_block", blockIDExt.String()))
 	}
 

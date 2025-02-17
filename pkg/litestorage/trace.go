@@ -260,7 +260,7 @@ func matchTransaction(tx *core.Transaction, lt uint64, back bool) bool {
 }
 
 func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Debug("attempting to get transaction from DB",
+	s.logger.Info("attempting to get transaction from DB",
 		zap.String("hash", hash.Hex()))
 
 	// Try DB first with shorter lock scope
@@ -290,7 +290,7 @@ func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bi
 
 	// If found in DB, return it
 	if err == nil {
-		s.logger.Debug("transaction found in DB",
+		s.logger.Info("transaction found in DB",
 			zap.String("hash", hash.Hex()))
 		return tx, nil
 	}
