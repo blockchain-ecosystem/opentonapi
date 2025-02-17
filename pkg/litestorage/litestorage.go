@@ -1100,59 +1100,40 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 }
 
 func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.BlockIDExt) error {
-	s.logger.Info("starting shard blocks processing",
-		zap.String("master_block", masterBlock.String()))
-
-	shards, err := s.client.GetAllShardsInfo(ctx, masterBlock)
+	block, err := s.getBlock(masterBlock)
 	if err != nil {
-		s.logger.Error("failed to get shard blocks",
-			zap.String("master_block", masterBlock.String()),
-			zap.Error(err))
-		return err
-	}
-
-	s.logger.Info("found shards to process",
-		zap.Int("shard_count", len(shards)),
-		zap.String("master_block", masterBlock.String()))
-
-	for i, shard := range shards {
-		s.logger.Info("processing shard block",
-			zap.Int("shard_index", i),
-			zap.String("shard_block", shard.BlockID.String()),
-			zap.String("master_block", masterBlock.String()))
-
-		blockIDExt := tongo.BlockIDExt{
-			BlockID:  shard.BlockID,
-			RootHash: masterBlock.RootHash,
-			FileHash: masterBlock.FileHash,
-		}
-
-		block, err := s.client.GetBlock(ctx, blockIDExt)
+		// If not in DB, fetch from chain
+		block, err = s.fetchBlockFromChain(ctx, masterBlock)
 		if err != nil {
-			s.logger.Error("failed to get shard block",
-				zap.String("shard_block", blockIDExt.String()),
-				zap.Error(err))
-			continue
+			return fmt.Errorf("failed to get master block: %w", err)
 		}
-
-		if err := s.processBlockAtomically(indexer.IDandBlock{
-			ID:    blockIDExt,
-			Block: &block,
-		}); err != nil {
-			s.logger.Error("failed to process shard block",
-				zap.String("shard_block", blockIDExt.String()),
-				zap.Error(err))
-			continue
-		}
-
-		s.logger.Info("successfully processed shard block",
-			zap.String("shard_block", blockIDExt.String()))
 	}
 
-	s.logger.Info("completed shard blocks processing",
+	shardIDs := tongo.ShardIDs(block)
+	s.logger.Info("starting shard blocks processing",
 		zap.String("master_block", masterBlock.String()),
-		zap.Int("processed_shards", len(shards)))
+		zap.Int("shard_count", len(shardIDs)))
 
+	for _, shardID := range shardIDs {
+		shardBlock, err := s.getBlock(shardID)
+		if err != nil {
+			// If not in DB, fetch from chain
+			shardBlock, err = s.fetchBlockFromChain(ctx, shardID)
+			if err != nil {
+				s.logger.Error("failed to get shard block",
+					zap.String("shard_block", shardID.String()),
+					zap.Error(err))
+				continue
+			}
+		}
+
+		if err := s.processBlockTransactionsSafely(shardID, shardBlock); err != nil {
+			s.logger.Error("failed to process shard block transactions",
+				zap.String("shard_block", shardID.String()),
+				zap.Error(err))
+			continue
+		}
+	}
 	return nil
 }
 
