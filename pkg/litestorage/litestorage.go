@@ -484,33 +484,53 @@ func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
 	s.blockMutex.Lock()
 	defer s.blockMutex.Unlock()
 
-	// First verify sequence
+	// Create error channel for concurrent processing
+	errChan := make(chan error, 2)
+
+	// Process master block in goroutine
+	go func() {
+		err := s.retryOperation(context.Background(), func(txn *badger.Txn) error {
+			if err := s.storeBlockTx(txn, block.ID, block.Block); err != nil {
+				return err
+			}
+			if err := s.processBlockTransactionsSafely(block.ID, block.Block); err != nil {
+				return err
+			}
+			return s.updateLastProcessedSeqnoTx(txn, block.ID.Seqno)
+		})
+		if err != nil {
+			s.logger.Error("failed to process master block",
+				zap.String("block_id", block.ID.String()),
+				zap.Error(err))
+		}
+		errChan <- err
+	}()
+
+	// Process shard blocks in goroutine
+	go func() {
+		err := s.processShardBlocks(context.Background(), block.ID)
+		if err != nil {
+			s.logger.Error("failed to process shard blocks",
+				zap.String("master_block", block.ID.String()),
+				zap.Error(err))
+		}
+		errChan <- err
+	}()
+
+	// Wait for both operations to complete
+	masterErr := <-errChan
+	shardErr := <-errChan
+
+	if masterErr != nil {
+		return fmt.Errorf("master block processing failed: %w", masterErr)
+	}
+	if shardErr != nil {
+		return fmt.Errorf("shard blocks processing failed: %w", shardErr)
+	}
+
+	// Verify sequence after all processing is done
 	if err := s.verifyBlockSequence(context.Background(), block.ID); err != nil {
 		return fmt.Errorf("block sequence verification failed: %w", err)
-	}
-
-	// Process master block
-	if err := s.retryOperation(context.Background(), func(txn *badger.Txn) error {
-		if err := s.storeBlockTx(txn, block.ID, block.Block); err != nil {
-			return err
-		}
-		if err := s.processBlockTransactionsSafely(block.ID, block.Block); err != nil {
-			return err
-		}
-		return s.updateLastProcessedSeqnoTx(txn, block.ID.Seqno)
-	}); err != nil {
-		s.logger.Error("failed to process master block",
-			zap.String("block_id", block.ID.String()),
-			zap.Error(err))
-		return err
-	}
-
-	// Always attempt to process shard blocks, even if master block had errors
-	if err := s.processShardBlocks(context.Background(), block.ID); err != nil {
-		s.logger.Error("failed to process shard blocks",
-			zap.String("master_block", block.ID.String()),
-			zap.Error(err))
-		// Don't return error here to avoid reprocessing the master block
 	}
 
 	return nil
@@ -1305,9 +1325,7 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 
 func (s *LiteStorage) retryOperation(ctx context.Context, fn func(txn *badger.Txn) error) error {
 	return retry.Do(
-		func() error {
-			return s.db.Update(fn)
-		},
+		func() error { return s.db.Update(fn) },
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.Context(ctx))
