@@ -1374,8 +1374,8 @@ func (s *LiteStorage) verifyBlockSequence(ctx context.Context, currentBlock tong
 		zap.Uint32("lastProcessed", lastProcessed))
 
 	if lastProcessed == 0 {
-		lastProcessed = currentBlock.Seqno - 2
-		s.lastProcessedSeqno = currentBlock.Seqno - 2
+		lastProcessed = currentBlock.Seqno - 3
+		s.lastProcessedSeqno = currentBlock.Seqno - 3
 		s.logger.Info("initializing last processed seqno",
 			zap.Uint32("current_block", currentBlock.Seqno),
 			zap.Uint32("lastProcessed", lastProcessed))
