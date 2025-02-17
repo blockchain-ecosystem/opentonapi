@@ -1340,12 +1340,22 @@ func (s *LiteStorage) getBlockWithRetry(ctx context.Context, blockID tongo.Block
 func (s *LiteStorage) verifyBlockSequence(ctx context.Context, currentBlock tongo.BlockIDExt) error {
 	lastProcessed, err := s.getLastProcessedSeqno()
 	if err != nil {
-		// If this is first run (no last processed seqno), initialize with current block - 1
 		if err == badger.ErrKeyNotFound {
+			// Get current masterchain info
+			info, err := s.client.GetMasterchainInfo(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get masterchain info: %w", err)
+			}
+
+			// Initialize with current block's seqno
+			initialSeqno := info.Last.Seqno - 1
 			s.logger.Info("initializing last processed seqno",
 				zap.Uint32("current_block", currentBlock.Seqno),
-				zap.Uint32("initial_seqno", currentBlock.Seqno-1))
-			return s.updateLastProcessedSeqnoTx(nil, currentBlock.Seqno-1)
+				zap.Uint32("initial_seqno", initialSeqno))
+
+			return s.retryOperation(ctx, func(txn *badger.Txn) error {
+				return s.updateLastProcessedSeqnoTx(txn, initialSeqno)
+			})
 		}
 		return err
 	}
