@@ -304,7 +304,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		},
 		blockRetryCount: 3,
 		blockRetryDelay: 100 * time.Millisecond,
-		blockQueue:      &BlockQueue{},
+		blockQueue:      NewBlockQueue(),
 		cleanupInterval: time.Hour, // default 1 hour interval
 		maxBatchSize:    1000,
 	}
@@ -1353,6 +1353,7 @@ func New(logger *zap.Logger, db *badger.DB, client *liteapi.Client) *LiteStorage
 		maxBatchSize:    1000,
 		blockRetryCount: 3,
 		blockRetryDelay: time.Second,
+		blockQueue:      NewBlockQueue(),
 	}
 	s.initMetrics()
 	return s
