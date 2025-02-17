@@ -1347,15 +1347,25 @@ func (s *LiteStorage) verifyBlockSequence(ctx context.Context, currentBlock tong
 				return fmt.Errorf("failed to get masterchain info: %w", err)
 			}
 
-			// Initialize with current block's seqno
-			initialSeqno := info.Last.Seqno - 1
+			// Initialize with current block's seqno - 1 to match indexer
+			initialSeqno := currentBlock.Seqno - 1
 			s.logger.Info("initializing last processed seqno",
 				zap.Uint32("current_block", currentBlock.Seqno),
-				zap.Uint32("initial_seqno", initialSeqno))
+				zap.Uint32("initial_seqno", initialSeqno),
+				zap.Uint32("masterchain_seqno", info.Last.Seqno))
 
-			return s.retryOperation(ctx, func(txn *badger.Txn) error {
+			if err := s.retryOperation(ctx, func(txn *badger.Txn) error {
 				return s.updateLastProcessedSeqnoTx(txn, initialSeqno)
-			})
+			}); err != nil {
+				return fmt.Errorf("failed to initialize last processed seqno: %w", err)
+			}
+
+			// Update in-memory value
+			s.seqnoMutex.Lock()
+			s.lastProcessedSeqno = initialSeqno
+			s.seqnoMutex.Unlock()
+
+			return nil
 		}
 		return err
 	}
