@@ -90,9 +90,8 @@ func (c *LiteStorage) TrimmedConfigBase64() (string, error) {
 	if len(conf) > 0 {
 		return conf, nil
 	}
-	// we haven't updated the config yet, so let's do it now.
-	// this can happen at start up.
-	params, err := c.client.GetConfigAll(context.TODO(), 0)
+	// Use background context for backward compatibility
+	params, err := c.client.GetConfigAll(context.Background(), 0)
 	if err != nil {
 		return "", err
 	}

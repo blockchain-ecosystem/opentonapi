@@ -4,15 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
-	"github.com/avast/retry-go"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tonkeeper/tongo"
 	"github.com/tonkeeper/tongo/abi"
 	"github.com/tonkeeper/tongo/boc"
-	"github.com/tonkeeper/tongo/tlb"
 	"go.uber.org/zap"
 
 	"github.com/dgraph-io/badger/v4"
@@ -46,7 +43,7 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("lite client not initialized")
 	}
 
-	ctx, cancel := s.withTimeout(ctx)
+	ctx, cancel := s.withTimeout(ctx, s.timeout)
 	defer cancel()
 
 	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
@@ -182,55 +179,24 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
-	s.txMutex.RLock()
-	defer s.txMutex.RUnlock()
-
-	ctx, cancel := s.withTimeout(ctx)
-	defer cancel()
-
-	var blockIDExt tongo.BlockIDExt
-	var block *tlb.Block
-
-	err := retry.Do(func() error {
-		var err error
-		blockIDExt, _, err = s.client.LookupBlock(ctx, blockID, 1, nil, nil)
-		if err != nil {
-			return err
-		}
-
-		if b, prs := s.blockCache.Load(blockIDExt); prs {
-			block = b
-			return nil
-		}
-
-		b, err := s.client.GetBlock(ctx, blockIDExt)
-		if err != nil {
-			return err
-		}
-		block = &b
-		s.blockCache.Store(blockIDExt, block)
-		return nil
-	},
-		retry.Attempts(3),
-		retry.Delay(time.Second),
-		retry.DelayType(retry.BackOffDelay))
-
+	// Get block first without holding txMutex
+	blockIDExt, block, err := s.getBlockWithRetry(ctx, blockID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
+
+	s.txMutex.RLock()
+	defer s.txMutex.RUnlock()
 
 	for _, tx := range block.AllTransactions() {
 		if tx.AccountAddr != a.Address {
 			continue
 		}
 
-		s.txMutex.Lock()
 		transaction, err := safeConvertTransaction(a.Workchain, tongo.Transaction{
 			BlockID:     blockIDExt,
 			Transaction: *tx,
 		}, nil)
-		s.txMutex.Unlock()
-
 		if err != nil {
 			s.logger.Error("failed to process transaction", zap.Error(err))
 			continue

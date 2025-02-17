@@ -3,6 +3,7 @@ package litestorage
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 	"go.uber.org/zap"
 
 	"encoding/hex"
+
+	"hash/maphash"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
@@ -60,6 +63,12 @@ func extractInMsgCreatedLT(accountID tongo.AccountID, tx *tlb.Transaction) (inMs
 type CacheOptions struct {
 	TTL     time.Duration
 	MaxSize int
+}
+
+type storageMetrics struct {
+	blockProcessingTime       prometheus.Histogram
+	transactionProcessingTime prometheus.Histogram
+	cleanupDuration           prometheus.Histogram
 }
 
 type LiteStorage struct {
@@ -97,6 +106,99 @@ type LiteStorage struct {
 	blockMutex          sync.RWMutex
 	blockRetryCount     int
 	blockRetryDelay     time.Duration
+	lastProcessedSeqno  uint32
+	seqnoMutex          sync.RWMutex
+	blockQueue          *BlockQueue
+	cleanupInterval     time.Duration
+	maxBatchSize        int
+	connPoolMetrics     struct {
+		active    prometheus.Gauge
+		available prometheus.Gauge
+	}
+	metrics      *storageMetrics
+	cleanupMutex sync.Mutex
+}
+
+type BlockQueue struct {
+	blocks    []indexer.IDandBlock
+	processed *xsync.MapOf[uint32, bool]
+	mu        sync.RWMutex
+}
+
+func NewBlockQueue() *BlockQueue {
+	return &BlockQueue{
+		blocks: make([]indexer.IDandBlock, 0, 1000),
+		processed: xsync.NewTypedMapOf[uint32, bool](func(_ maphash.Seed, v uint32) uint64 {
+			return uint64(v)
+		}),
+	}
+}
+
+func (q *BlockQueue) Add(block indexer.IDandBlock) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.IsProcessed(block.ID.Seqno) {
+		return
+	}
+
+	// Find insertion point to maintain order
+	idx := sort.Search(len(q.blocks), func(i int) bool {
+		return q.blocks[i].ID.Seqno >= block.ID.Seqno
+	})
+
+	// Insert block at correct position
+	if idx == len(q.blocks) {
+		q.blocks = append(q.blocks, block)
+	} else if q.blocks[idx].ID.Seqno != block.ID.Seqno {
+		q.blocks = append(q.blocks[:idx+1], q.blocks[idx:]...)
+		q.blocks[idx] = block
+	}
+}
+
+func (q *BlockQueue) IsProcessed(seqno uint32) bool {
+	// No need for mutex as xsync.MapOf is thread-safe
+	val, exists := q.processed.Load(seqno)
+	return exists && val
+}
+
+func (q *BlockQueue) MarkProcessed(seqno uint32) {
+	q.processed.Store(seqno, true)
+
+	// Cleanup in a separate goroutine to not block
+	go q.cleanup()
+}
+
+func (q *BlockQueue) cleanup() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	newBlocks := make([]indexer.IDandBlock, 0, len(q.blocks))
+	for _, block := range q.blocks {
+		if !q.IsProcessed(block.ID.Seqno) {
+			newBlocks = append(newBlocks, block)
+		}
+	}
+	q.blocks = newBlocks
+}
+
+func (q *BlockQueue) GetBlocks() []indexer.IDandBlock {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	result := make([]indexer.IDandBlock, len(q.blocks))
+	copy(result, q.blocks)
+	return result
+}
+
+func (q *BlockQueue) GetOrderedBlocks() []indexer.IDandBlock {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	// Return a copy of the blocks slice to prevent race conditions
+	orderedBlocks := make([]indexer.IDandBlock, len(q.blocks))
+	copy(orderedBlocks, q.blocks)
+	return orderedBlocks
 }
 
 type Options struct {
@@ -179,13 +281,15 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 	}
 
 	s := &LiteStorage{
-		logger:                 logger,
-		client:                 cli,
-		executor:               o.executor,
-		stopCh:                 make(chan struct{}),
-		knownAccounts:          make(map[string][]tongo.AccountID),
-		jettonMetaCache:        xsync.NewTypedMapOf[string, tep64.Metadata](hashString),
-		blockCache:             xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](hashBlockIDExt),
+		logger:          logger,
+		client:          cli,
+		executor:        o.executor,
+		stopCh:          make(chan struct{}),
+		knownAccounts:   make(map[string][]tongo.AccountID),
+		jettonMetaCache: xsync.NewTypedMapOf[string, tep64.Metadata](hashString),
+		blockCache: xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](func(_ maphash.Seed, v tongo.BlockIDExt) uint64 {
+			return uint64(v.Seqno)
+		}),
 		accountInterfacesCache: xsync.NewTypedMapOf[tongo.AccountID, []abi.ContractInterface](hashAccountID),
 		pubKeyByAccountID:      xsync.NewTypedMapOf[tongo.AccountID, ed25519.PublicKey](hashAccountID),
 		tvmLibraryCache:        cache.NewLRUCache[string, boc.Cell](10000, "tvm_libraries"),
@@ -200,6 +304,9 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		},
 		blockRetryCount: 3,
 		blockRetryDelay: 100 * time.Millisecond,
+		blockQueue:      &BlockQueue{},
+		cleanupInterval: time.Hour, // default 1 hour interval
+		maxBatchSize:    1000,
 	}
 	s.knownAccounts["tf_pools"] = o.tfPools
 	s.knownAccounts["jettons"] = o.jettons
@@ -320,46 +427,133 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 }
 
 func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
-	// s.logger.Info("starting block processing loop")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case block := <-ch:
+			if block.Block == nil {
+				continue
+			}
 
-	for block := range ch {
-		// Validate block
-		if block.Block == nil {
-			s.logger.Error("received nil block")
-			continue
-		}
-
-		// Process block atomically
-		err := s.processBlockAtomically(block)
-		if err != nil {
-			s.logger.Error("failed to process block",
-				zap.String("block_id", block.ID.String()),
-				zap.Error(err))
-			continue
+			s.blockQueue.Add(block)
+			s.processQueuedBlocks(ctx)
 		}
 	}
 }
 
+func (s *LiteStorage) processQueuedBlocks(ctx context.Context) {
+	s.seqnoMutex.Lock()
+	defer s.seqnoMutex.Unlock()
+
+	lastSeqno, err := s.getLastProcessedSeqno()
+	if err != nil {
+		s.logger.Error("failed to get last processed seqno", zap.Error(err))
+		return
+	}
+	s.lastProcessedSeqno = lastSeqno
+
+	// Process blocks in batches
+	batchSize := 100
+	blocks := s.blockQueue.GetOrderedBlocks()
+
+	for i := 0; i < len(blocks); i += batchSize {
+		end := i + batchSize
+		if end > len(blocks) {
+			end = len(blocks)
+		}
+
+		if err := s.processBatchAtomically(ctx, blocks[i:end]); err != nil {
+			s.logger.Error("failed to process batch",
+				zap.Error(err),
+				zap.Int("batch_start", i),
+				zap.Int("batch_end", end))
+			return
+		}
+	}
+}
+
+func (s *LiteStorage) processBatchAtomically(ctx context.Context, blocks []indexer.IDandBlock) error {
+	for _, block := range blocks {
+		if err := s.processBlockAtomically(block); err != nil {
+			s.logger.Error("failed to process block", zap.Error(err))
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
-	// s.logger.Info("starting block processing",
-	// zap.String("block_id", block.ID.String()))
+	s.blockMutex.Lock()
+	defer s.blockMutex.Unlock()
 
-	// Store master block
-	if err := s.storeBlock(block.ID, block.Block); err != nil {
-		return fmt.Errorf("failed to store master block: %w", err)
+	return s.db.Update(func(txn *badger.Txn) error {
+		// Store block data
+		if err := s.storeBlockTx(txn, block.ID, block.Block); err != nil {
+			return err
+		}
+
+		// Process transactions
+		if err := s.processBlockTransactions(block.ID, block.Block); err != nil {
+			return err
+		}
+
+		// Update sequence number
+		return s.updateLastProcessedSeqnoTx(txn, block.ID.Seqno)
+	})
+}
+
+func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *tlb.Block) error {
+	s.txMutex.Lock()
+	defer s.txMutex.Unlock()
+
+	txs := block.AllTransactions()
+	batchSize := s.maxBatchSize
+
+	// Pre-allocate transaction batch
+	batch := make([]*core.Transaction, 0, batchSize)
+
+	for i := 0; i < len(txs); i += batchSize {
+		end := i + batchSize
+		if end > len(txs) {
+			end = len(txs)
+		}
+
+		// Convert transactions in parallel
+		errCh := make(chan error, end-i)
+		txCh := make(chan *core.Transaction, end-i)
+
+		for _, tx := range txs[i:end] {
+			go func(tx *tlb.Transaction) {
+				transaction, err := safeConvertTransaction(blockID.Workchain,
+					tongo.Transaction{
+						BlockID:     blockID,
+						Transaction: *tx,
+					}, nil)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				txCh <- transaction
+			}(tx)
+		}
+
+		// Collect results
+		for j := i; j < end; j++ {
+			select {
+			case err := <-errCh:
+				s.logger.Error("failed to convert transaction", zap.Error(err))
+			case tx := <-txCh:
+				batch = append(batch, tx)
+			}
+		}
+
+		if err := s.storeTransactionBatch(batch); err != nil {
+			return fmt.Errorf("failed to store transaction batch: %w", err)
+		}
+
+		batch = batch[:0] // Reset batch
 	}
-
-	// Process master block transactions
-	if err := s.processBlockTransactions(block.ID, block.Block); err != nil {
-		return fmt.Errorf("failed to process master transactions: %w", err)
-	}
-
-	// Process shard blocks
-	if err := s.processShardBlocks(context.Background(), block.ID); err != nil {
-		s.logger.Error("failed to process shard blocks", zap.Error(err))
-		// Don't return error to continue processing
-	}
-
 	return nil
 }
 
@@ -793,8 +987,11 @@ func (s *LiteStorage) getClient() (*liteapi.Client, func()) {
 }
 
 // Add context timeout wrapper
-func (s *LiteStorage) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, s.timeout)
+func (s *LiteStorage) withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return ctx, func() {}
 }
 
 func safeConvertTransaction(workchain int32, tx tongo.Transaction, cd *abi.ContractDescription) (*core.Transaction, error) {
@@ -926,44 +1123,10 @@ func (s *LiteStorage) processShardBlocks(ctx context.Context, masterBlock tongo.
 	return nil
 }
 
-func (s *LiteStorage) processBlockTransactions(blockID tongo.BlockIDExt, block *tlb.Block) error {
-	txBatch := make([]*core.Transaction, 0, len(block.AllTransactions()))
-
-	for _, tx := range block.AllTransactions() {
-		hash := tongo.Bits256(tx.Hash())
-		transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
-			BlockID:     blockID,
-			Transaction: *tx,
-		}, nil)
-		if err != nil {
-			s.logger.Error("failed to convert transaction",
-				zap.String("hash", hash.Hex()),
-				zap.Error(err))
-			continue
-		}
-		txBatch = append(txBatch, transaction)
-	}
-
-	return s.db.Update(func(txn *badger.Txn) error {
-		for _, tx := range txBatch {
-			hash := tx.Hash
-			data, err := json.Marshal(tx)
-			if err != nil {
-				return fmt.Errorf("failed to marshal transaction: %w", err)
-			}
-			key := append([]byte(txKeyPrefix), hash[:]...)
-			if err := txn.Set(key, data); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
 func (s *LiteStorage) findTransactionInBlock(block *tlb.Block, blockID tongo.BlockIDExt, hash tongo.Bits256) *core.Transaction {
 	for _, tx := range block.AllTransactions() {
 		if tongo.Bits256(tx.Hash()) == hash {
-			transaction, err := safeConvertTransaction(block.Info.Shard.WorkchainID, tongo.Transaction{
+			transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
 				BlockID:     blockID,
 				Transaction: *tx,
 			}, nil)
@@ -976,5 +1139,367 @@ func (s *LiteStorage) findTransactionInBlock(block *tlb.Block, blockID tongo.Blo
 			return transaction
 		}
 	}
+	return nil
+}
+
+func (s *LiteStorage) validateAndRecoverBlockSequence(ctx context.Context, block indexer.IDandBlock) error {
+	if block.ID.Seqno != s.lastProcessedSeqno+1 {
+		s.logger.Warn("block sequence gap detected",
+			zap.Uint32("expected", s.lastProcessedSeqno+1),
+			zap.Uint32("got", block.ID.Seqno))
+
+		// Attempt to recover missing blocks
+		for seqno := s.lastProcessedSeqno + 1; seqno < block.ID.Seqno; seqno++ {
+			if err := s.recoverMissingBlock(ctx, seqno); err != nil {
+				return fmt.Errorf("failed to recover block %d: %w", seqno, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *LiteStorage) getLastProcessedSeqno() (uint32, error) {
+	var lastSeqno uint32
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get([]byte("last_processed_seqno"))
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil // Return 0 for initial state
+			}
+			return fmt.Errorf("database error: %w", err)
+		}
+		return item.Value(func(val []byte) error {
+			lastSeqno = binary.LittleEndian.Uint32(val)
+			return nil
+		})
+	})
+	return lastSeqno, err
+}
+
+// Also add method to update the seqno
+func (s *LiteStorage) updateStateAtomically(seqno uint32, block indexer.IDandBlock) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		// Update last processed seqno
+		if err := s.updateLastProcessedSeqnoTx(txn, seqno); err != nil {
+			return err
+		}
+
+		// Mark block as processed in queue
+		s.blockQueue.MarkProcessed(seqno)
+
+		return nil
+	})
+}
+
+func (s *LiteStorage) recoverMissingBlocks(ctx context.Context, fromSeqno, toSeqno uint32) error {
+	s.logger.Info("recovering missing blocks",
+		zap.Uint32("from", fromSeqno),
+		zap.Uint32("to", toSeqno))
+
+	for seqno := fromSeqno; seqno <= toSeqno; seqno++ {
+		blockID := tongo.BlockIDExt{
+			BlockID: tongo.BlockID{
+				Workchain: -1, // masterchain
+				Shard:     uint64(tongo.MustParseShardID(-0x8000000000000000).Encode()),
+				Seqno:     seqno,
+			},
+		}
+
+		// Fetch block from chain
+		block, err := s.fetchBlockFromChain(ctx, blockID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch block %d: %w", seqno, err)
+		}
+
+		// Process the recovered block
+		if err := s.processBlockAtomically(indexer.IDandBlock{
+			ID:    blockID,
+			Block: block,
+		}); err != nil {
+			return fmt.Errorf("failed to process recovered block %d: %w", seqno, err)
+		}
+
+		s.logger.Debug("recovered block",
+			zap.Uint32("seqno", seqno))
+	}
+
+	return nil
+}
+
+func (s *LiteStorage) storeBlockWithCache(blockID tongo.BlockIDExt, block *tlb.Block) error {
+	s.blockMutex.Lock()
+	defer s.blockMutex.Unlock()
+
+	if err := s.storeBlock(blockID, block); err != nil {
+		return err
+	}
+
+	s.blockCache.Store(blockID, block)
+	return nil
+}
+
+func (s *LiteStorage) updateLastProcessedSeqnoTx(txn *badger.Txn, seqno uint32) error {
+	buf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(buf, seqno)
+	return txn.Set([]byte("last_processed_seqno"), buf)
+}
+
+func (s *LiteStorage) storeBlockTx(txn *badger.Txn, blockID tongo.BlockIDExt, block *tlb.Block) error {
+	data, err := json.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("failed to marshal block: %w", err)
+	}
+
+	key := append([]byte("blk:"), []byte(blockID.String())...)
+	return txn.Set(key, data)
+}
+
+const maxBatchSize = 1000
+
+func (s *LiteStorage) processBlockTransactionsSafely(blockID tongo.BlockIDExt, block *tlb.Block) error {
+	s.txMutex.Lock()
+	defer s.txMutex.Unlock()
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, tx := range block.AllTransactions() {
+			hash := tongo.Bits256(tx.Hash())
+			transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+				BlockID:     blockID,
+				Transaction: *tx,
+			}, nil)
+			if err != nil {
+				s.logger.Error("failed to convert transaction",
+					zap.String("hash", hash.Hex()),
+					zap.Error(err))
+				continue
+			}
+
+			if err := s.storeTransactionTx(txn, hash, transaction); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *LiteStorage) processTransactionBatchTx(blockID tongo.BlockIDExt, txs []*tlb.Transaction) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, tx := range txs {
+			hash := tongo.Bits256(tx.Hash())
+			transaction, err := safeConvertTransaction(blockID.Workchain, tongo.Transaction{
+				BlockID:     blockID,
+				Transaction: *tx,
+			}, nil)
+			if err != nil {
+				s.logger.Error("failed to convert transaction",
+					zap.String("hash", hash.Hex()),
+					zap.Error(err))
+				continue
+			}
+
+			data, err := json.Marshal(transaction)
+			if err != nil {
+				return fmt.Errorf("failed to marshal transaction: %w", err)
+			}
+
+			key := append([]byte(txKeyPrefix), hash[:]...)
+			if err := txn.Set(key, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *LiteStorage) searchTransactionInBlockSafely(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID) (*core.Transaction, error) {
+	s.txMutex.RLock()
+	defer s.txMutex.RUnlock()
+
+	blockIDExt, block, err := s.getBlockWithRetry(ctx, blockID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block: %w", err)
+	}
+
+	for _, tx := range block.AllTransactions() {
+		if tx.AccountAddr != a.Address {
+			continue
+		}
+
+		transaction, err := safeConvertTransaction(a.Workchain, tongo.Transaction{
+			BlockID:     blockIDExt,
+			Transaction: *tx,
+		}, nil)
+		if err != nil {
+			s.logger.Error("failed to process transaction", zap.Error(err))
+			continue
+		}
+
+		return transaction, nil
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func New(logger *zap.Logger, db *badger.DB, client *liteapi.Client) *LiteStorage {
+	s := &LiteStorage{
+		logger:       logger,
+		db:           db,
+		client:       client,
+		timeout:      30 * time.Second,
+		cleanupMutex: sync.Mutex{},
+		blockCache: xsync.NewTypedMapOf[tongo.BlockIDExt, *tlb.Block](func(_ maphash.Seed, v tongo.BlockIDExt) uint64 {
+			return uint64(v.Seqno)
+		}),
+		cleanupInterval: time.Hour,
+		maxBatchSize:    1000,
+		blockRetryCount: 3,
+		blockRetryDelay: time.Second,
+	}
+	s.initMetrics()
+	return s
+}
+
+func (s *LiteStorage) getBlockWithRetry(ctx context.Context, blockID tongo.BlockID) (tongo.BlockIDExt, *tlb.Block, error) {
+	var blockIDExt tongo.BlockIDExt
+	var block *tlb.Block
+
+	err := retry.Do(func() error {
+		var err error
+		blockIDExt, _, err = s.client.LookupBlock(ctx, blockID, 1, nil, nil)
+		if err != nil {
+			return err
+		}
+
+		block, err = s.getBlock(blockIDExt)
+		if err != nil {
+			block, err = s.fetchBlockFromChain(ctx, blockIDExt)
+		}
+		return err
+	},
+		retry.Attempts(uint(s.blockRetryCount)),
+		retry.Delay(s.blockRetryDelay),
+		retry.DelayType(retry.BackOffDelay))
+
+	return blockIDExt, block, err
+}
+
+func (s *LiteStorage) recoverMissingBlock(ctx context.Context, seqno uint32) error {
+	blockID, block, err := s.fetchBlockBySeqno(ctx, seqno)
+	if err != nil {
+		return err
+	}
+
+	return s.processBlockAtomically(indexer.IDandBlock{
+		ID:    blockID,
+		Block: block,
+	})
+}
+
+func (s *LiteStorage) fetchBlockBySeqno(ctx context.Context, seqno uint32) (tongo.BlockIDExt, *tlb.Block, error) {
+	masterInfo, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return tongo.BlockIDExt{}, nil, err
+	}
+
+	blockID := tongo.BlockID{
+		Workchain: -1,
+		Shard:     masterInfo.Last.Shard,
+		Seqno:     seqno,
+	}
+
+	return s.getBlockWithRetry(ctx, blockID)
+}
+
+func (s *LiteStorage) storeTransactionTx(txn *badger.Txn, hash tongo.Bits256, tx *core.Transaction) error {
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("failed to marshal transaction: %w", err)
+	}
+
+	key := append([]byte(txKeyPrefix), hash[:]...)
+	return txn.Set(key, data)
+}
+
+func (s *LiteStorage) recoverFromError(ctx context.Context, err error) error {
+	if errors.Is(err, badger.ErrDiscardedTxn) {
+		// Handle transaction conflicts
+		return s.retryOperation(ctx)
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		// Handle timeout
+		return s.handleTimeout(ctx)
+	}
+
+	// Log unexpected errors
+	s.logger.Error("unexpected error",
+		zap.Error(err),
+		zap.String("component", "storage"))
+
+	return err
+}
+
+func (s *LiteStorage) initMetrics() {
+	s.metrics = &storageMetrics{
+		blockProcessingTime: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name:    "block_processing_duration_seconds",
+			Help:    "Time spent processing blocks",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 10),
+		}),
+		transactionProcessingTime: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name:    "transaction_processing_duration_seconds",
+			Help:    "Time spent processing transactions",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 10),
+		}),
+		cleanupDuration: promauto.NewHistogram(prometheus.HistogramOpts{
+			Name:    "cleanup_duration_seconds",
+			Help:    "Time spent on cleanup operations",
+			Buckets: prometheus.ExponentialBuckets(0.1, 2, 10),
+		}),
+	}
+}
+
+func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, tx := range batch {
+			data, err := json.Marshal(tx)
+			if err != nil {
+				return fmt.Errorf("failed to marshal transaction: %w", err)
+			}
+			key := append([]byte(txKeyPrefix), tx.Hash[:]...)
+			if err := txn.Set(key, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *LiteStorage) retryOperation(ctx context.Context) error {
+	return retry.Do(func() error {
+		return s.db.Update(func(txn *badger.Txn) error {
+			// Retry the transaction
+			return nil
+		})
+	},
+		retry.Attempts(3),
+		retry.Delay(100*time.Millisecond),
+		retry.Context(ctx))
+}
+
+func (s *LiteStorage) handleTimeout(ctx context.Context) error {
+	s.logger.Warn("operation timed out",
+		zap.String("component", "storage"),
+		zap.Duration("timeout", s.timeout))
+
+	// Attempt cleanup of any partial operations
+	if err := s.cleanupPartialOperations(); err != nil {
+		s.logger.Error("failed to cleanup after timeout", zap.Error(err))
+	}
+
+	return context.DeadlineExceeded
+}
+
+func (s *LiteStorage) cleanupPartialOperations() error {
+	// Implement cleanup logic for partial operations
 	return nil
 }

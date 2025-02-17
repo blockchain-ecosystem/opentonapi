@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sourcegraph/conc/iter"
@@ -37,6 +38,21 @@ func New(logger *zap.Logger, cli *liteapi.Client) *Indexer {
 type IDandBlock struct {
 	ID    tongo.BlockIDExt
 	Block *tlb.Block
+}
+
+type BlockQueue struct {
+	blocks    []IDandBlock
+	processed map[uint32]bool
+	mu        sync.Mutex
+}
+
+func (q *BlockQueue) Add(block IDandBlock) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.blocks = append(q.blocks, block)
+	sort.Slice(q.blocks, func(i, j int) bool {
+		return q.blocks[i].ID.Seqno < q.blocks[j].ID.Seqno
+	})
 }
 
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
@@ -137,37 +153,29 @@ func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 
 	lastSeqno := chunk.masterID.Seqno + 1
 	const batchSize = 100
-	blocks := make([]IDandBlock, 0, batchSize)
+	// blocks := make([]IDandBlock, 0, batchSize)
+
+	// Add rate limiting
+	rateLimiter := time.NewTicker(50 * time.Millisecond)
+	defer rateLimiter.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
+		case <-rateLimiter.C:
+			// Process blocks with rate limiting
 			chunk, err := idx.initChunk(lastSeqno)
 			if err != nil {
 				idx.logger.Error("failed to initialize chunk", zap.Error(err))
-				time.Sleep(time.Second)
 				continue
 			}
 
-			blocks = append(blocks, chunk.blocks...)
-
-			if len(blocks) >= batchSize {
-				// Process batch in parallel
-				iter.ForEach(blocks, func(block *IDandBlock) {
-					for _, ch := range channels {
-						select {
-						case ch <- *block:
-						case <-time.After(time.Second):
-							idx.logger.Warn("channel full, skipping block",
-								zap.String("block_id", block.ID.String()))
-						}
-					}
-				})
-				blocks = blocks[:0]
+			for _, block := range chunk.blocks {
+				if !idx.sendBlockToChannels(ctx, block, channels) {
+					return
+				}
 			}
-
 			lastSeqno = chunk.masterID.Seqno + 1
 		}
 	}
@@ -339,4 +347,21 @@ func (idx *Indexer) monitorChannel(ctx context.Context, ch chan IDandBlock, inde
 			}
 		}
 	}
+}
+
+func (idx *Indexer) sendBlockToChannels(ctx context.Context, block IDandBlock, channels []chan IDandBlock) bool {
+	for _, ch := range channels {
+		select {
+		case ch <- block:
+			idx.logger.Debug("sent block to channel",
+				zap.String("block_id", block.ID.String()))
+		case <-ctx.Done():
+			return false
+		case <-time.After(5 * time.Second):
+			idx.logger.Warn("channel full, skipping block",
+				zap.String("block_id", block.ID.String()))
+			return false
+		}
+	}
+	return true
 }

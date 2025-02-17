@@ -20,20 +20,30 @@ func (s *LiteStorage) storeBlock(blockID tongo.BlockIDExt, block *tlb.Block) err
 		return fmt.Errorf("failed to marshal block: %w", err)
 	}
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	err = s.db.Update(func(txn *badger.Txn) error {
 		key := append([]byte("blk:"), []byte(blockID.String())...)
 		return txn.Set(key, data)
 	})
+	if err != nil {
+		return err
+	}
+
+	s.blockCache.Store(blockID, block)
+	return nil
 }
 
 func (s *LiteStorage) getBlock(blockID tongo.BlockIDExt) (*tlb.Block, error) {
-	// Check cache first
 	if block, ok := s.blockCache.Load(blockID); ok {
 		return block, nil
 	}
 
-	s.blockMutex.RLock()
-	defer s.blockMutex.RUnlock()
+	s.blockMutex.Lock()
+	defer s.blockMutex.Unlock()
+
+	// Double check cache
+	if block, ok := s.blockCache.Load(blockID); ok {
+		return block, nil
+	}
 
 	var block tlb.Block
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -51,7 +61,6 @@ func (s *LiteStorage) getBlock(blockID tongo.BlockIDExt) (*tlb.Block, error) {
 		return nil, fmt.Errorf("failed to get block: %w", err)
 	}
 
-	// Cache for future use
 	s.blockCache.Store(blockID, &block)
 	return &block, nil
 }
