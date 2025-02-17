@@ -121,15 +121,15 @@ type LiteStorage struct {
 
 type BlockQueue struct {
 	blocks    []indexer.IDandBlock
-	processed *xsync.MapOf[uint32, bool]
+	processed *xsync.MapOf[tongo.BlockIDExt, bool]
 	mu        sync.RWMutex
 }
 
 func NewBlockQueue() *BlockQueue {
 	return &BlockQueue{
 		blocks: make([]indexer.IDandBlock, 0, 1000),
-		processed: xsync.NewTypedMapOf[uint32, bool](func(_ maphash.Seed, v uint32) uint64 {
-			return uint64(v)
+		processed: xsync.NewTypedMapOf[tongo.BlockIDExt, bool](func(_ maphash.Seed, v tongo.BlockIDExt) uint64 {
+			return uint64(v.Seqno)
 		}),
 	}
 }
@@ -138,7 +138,7 @@ func (q *BlockQueue) Add(block indexer.IDandBlock) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.IsProcessed(block.ID.Seqno) {
+	if q.IsProcessed(block.ID) {
 		return
 	}
 
@@ -156,16 +156,13 @@ func (q *BlockQueue) Add(block indexer.IDandBlock) {
 	}
 }
 
-func (q *BlockQueue) IsProcessed(seqno uint32) bool {
-	// No need for mutex as xsync.MapOf is thread-safe
-	val, exists := q.processed.Load(seqno)
+func (q *BlockQueue) IsProcessed(id tongo.BlockIDExt) bool {
+	val, exists := q.processed.Load(id)
 	return exists && val
 }
 
-func (q *BlockQueue) MarkProcessed(seqno uint32) {
-	q.processed.Store(seqno, true)
-
-	// Cleanup in a separate goroutine to not block
+func (q *BlockQueue) MarkProcessed(id tongo.BlockIDExt) {
+	q.processed.Store(id, true)
 	go q.cleanup()
 }
 
@@ -175,7 +172,7 @@ func (q *BlockQueue) cleanup() {
 
 	newBlocks := make([]indexer.IDandBlock, 0, len(q.blocks))
 	for _, block := range q.blocks {
-		if !q.IsProcessed(block.ID.Seqno) {
+		if !q.IsProcessed(block.ID) {
 			newBlocks = append(newBlocks, block)
 		}
 	}
@@ -1185,7 +1182,7 @@ func (s *LiteStorage) updateStateAtomically(seqno uint32, block indexer.IDandBlo
 		}
 
 		// Mark block as processed in queue
-		s.blockQueue.MarkProcessed(seqno)
+		s.blockQueue.MarkProcessed(block.ID)
 
 		return nil
 	})
