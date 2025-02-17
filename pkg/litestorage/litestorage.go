@@ -1194,31 +1194,52 @@ func (s *LiteStorage) recoverMissingBlocks(ctx context.Context, fromSeqno, toSeq
 		zap.Uint32("from", fromSeqno),
 		zap.Uint32("to", toSeqno))
 
+	// Get current masterchain info to get workchain and shard
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
 	for seqno := fromSeqno; seqno <= toSeqno; seqno++ {
-		blockID := tongo.BlockIDExt{
-			BlockID: tongo.BlockID{
-				Workchain: -1, // masterchain
-				Shard:     uint64(tongo.MustParseShardID(-0x8000000000000000).Encode()),
-				Seqno:     seqno,
-			},
+		blockID := tongo.BlockID{
+			Workchain: -1, // Masterchain workchain
+			Shard:     info.Last.Shard,
+			Seqno:     seqno,
 		}
 
-		// Fetch block from chain
-		block, err := s.fetchBlockFromChain(ctx, blockID)
-		if err != nil {
-			return fmt.Errorf("failed to fetch block %d: %w", seqno, err)
-		}
-
-		// Process the recovered block
-		if err := s.processBlockAtomically(indexer.IDandBlock{
-			ID:    blockID,
-			Block: block,
-		}); err != nil {
-			return fmt.Errorf("failed to process recovered block %d: %w", seqno, err)
-		}
-
-		s.logger.Debug("recovered block",
+		s.logger.Debug("recovering block",
+			zap.String("block_id", blockID.String()),
 			zap.Uint32("seqno", seqno))
+
+		// Use LookupBlock to get the full BlockIDExt
+		blockIDExt, _, err := s.client.LookupBlock(ctx, blockID, 1, nil, nil)
+		if err != nil {
+			s.logger.Error("failed to lookup block",
+				zap.String("block_id", blockID.String()),
+				zap.Error(err))
+			continue
+		}
+
+		block, err := s.client.GetBlock(ctx, blockIDExt)
+		if err != nil {
+			s.logger.Error("failed to get block",
+				zap.String("block_id_ext", blockIDExt.String()),
+				zap.Error(err))
+			continue
+		}
+
+		if err := s.processBlockAtomically(indexer.IDandBlock{
+			ID:    blockIDExt,
+			Block: &block,
+		}); err != nil {
+			s.logger.Error("failed to process recovered block",
+				zap.String("block_id_ext", blockIDExt.String()),
+				zap.Error(err))
+			continue
+		}
+
+		s.logger.Debug("successfully recovered block",
+			zap.String("block_id_ext", blockIDExt.String()))
 	}
 
 	return nil
