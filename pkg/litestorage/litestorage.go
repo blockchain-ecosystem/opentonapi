@@ -1340,6 +1340,13 @@ func (s *LiteStorage) getBlockWithRetry(ctx context.Context, blockID tongo.Block
 func (s *LiteStorage) verifyBlockSequence(ctx context.Context, currentBlock tongo.BlockIDExt) error {
 	lastProcessed, err := s.getLastProcessedSeqno()
 	if err != nil {
+		// If this is first run (no last processed seqno), initialize with current block - 1
+		if err == badger.ErrKeyNotFound {
+			s.logger.Info("initializing last processed seqno",
+				zap.Uint32("current_block", currentBlock.Seqno),
+				zap.Uint32("initial_seqno", currentBlock.Seqno-1))
+			return s.updateLastProcessedSeqnoTx(nil, currentBlock.Seqno-1)
+		}
 		return err
 	}
 
