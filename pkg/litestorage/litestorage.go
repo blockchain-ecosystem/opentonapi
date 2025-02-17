@@ -864,6 +864,9 @@ func (s *LiteStorage) GetBlockTransactions(ctx context.Context, id tongo.BlockID
 	if err != nil {
 		return nil, err
 	}
+
+	s.logger.Info("getting block transactions",
+		zap.String("block_id", blockID.String()))
 	block, err := s.client.GetBlock(ctx, blockID)
 	if err != nil {
 		return nil, err
