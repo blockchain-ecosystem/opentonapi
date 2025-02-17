@@ -484,10 +484,12 @@ func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
 	s.blockMutex.Lock()
 	defer s.blockMutex.Unlock()
 
+	// First verify sequence
 	if err := s.verifyBlockSequence(context.Background(), block.ID); err != nil {
 		return fmt.Errorf("block sequence verification failed: %w", err)
 	}
 
+	// Process master block
 	if err := s.retryOperation(context.Background(), func(txn *badger.Txn) error {
 		if err := s.storeBlockTx(txn, block.ID, block.Block); err != nil {
 			return err
@@ -497,11 +499,21 @@ func (s *LiteStorage) processBlockAtomically(block indexer.IDandBlock) error {
 		}
 		return s.updateLastProcessedSeqnoTx(txn, block.ID.Seqno)
 	}); err != nil {
+		s.logger.Error("failed to process master block",
+			zap.String("block_id", block.ID.String()),
+			zap.Error(err))
 		return err
 	}
 
-	// Process shard blocks after master block
-	return s.processShardBlocks(context.Background(), block.ID)
+	// Always attempt to process shard blocks, even if master block had errors
+	if err := s.processShardBlocks(context.Background(), block.ID); err != nil {
+		s.logger.Error("failed to process shard blocks",
+			zap.String("master_block", block.ID.String()),
+			zap.Error(err))
+		// Don't return error here to avoid reprocessing the master block
+	}
+
+	return nil
 }
 
 func (s *LiteStorage) processBlockTransactionsSafely(blockID tongo.BlockIDExt, block *tlb.Block) error {
