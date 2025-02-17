@@ -1206,7 +1206,7 @@ func (s *LiteStorage) recoverMissingBlocks(ctx context.Context, fromSeqno, toSeq
 		zap.Uint32("from", fromSeqno),
 		zap.Uint32("to", toSeqno))
 
-	// Get current masterchain info to get workchain and shard
+	// Get current masterchain info
 	info, err := s.client.GetMasterchainInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get masterchain info: %w", err)
@@ -1214,16 +1214,16 @@ func (s *LiteStorage) recoverMissingBlocks(ctx context.Context, fromSeqno, toSeq
 
 	for seqno := fromSeqno; seqno <= toSeqno; seqno++ {
 		blockID := tongo.BlockID{
-			Workchain: -1, // Masterchain workchain
+			Workchain: -1,
 			Shard:     info.Last.Shard,
 			Seqno:     seqno,
 		}
 
-		s.logger.Debug("recovering block",
+		s.logger.Info("attempting to recover block",
 			zap.String("block_id", blockID.String()),
+			zap.Uint64("shard", info.Last.Shard),
 			zap.Uint32("seqno", seqno))
 
-		// Use LookupBlock to get the full BlockIDExt
 		blockIDExt, _, err := s.client.LookupBlock(ctx, blockID, 1, nil, nil)
 		if err != nil {
 			s.logger.Error("failed to lookup block",
@@ -1250,7 +1250,7 @@ func (s *LiteStorage) recoverMissingBlocks(ctx context.Context, fromSeqno, toSeq
 			continue
 		}
 
-		s.logger.Debug("successfully recovered block",
+		s.logger.Info("successfully recovered block",
 			zap.String("block_id_ext", blockIDExt.String()))
 	}
 
