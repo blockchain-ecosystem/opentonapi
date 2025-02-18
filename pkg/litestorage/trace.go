@@ -157,10 +157,39 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 		return nil, fmt.Errorf("can't find tx because of depth limit")
 	}
 
-	// Try cache and chain through searchTxInCache
+	// Try cache first
 	tx := s.searchTxInCache(a, lt)
 	if tx != nil {
 		return tx, nil
+	}
+
+	// Search in masterchain and shard blocks
+	const searchRange = 10 // Look 5 blocks in each direction
+	currentSeqno := blockID.Seqno
+
+	for i := 0; i < searchRange; i++ {
+		seqno := currentSeqno
+		if back {
+			seqno -= uint32(i)
+		} else {
+			seqno += uint32(i)
+		}
+
+		transactions, err := s.GetMasterchainTransactions(ctx, int32(seqno))
+		if err != nil {
+			s.logger.Error("failed to get masterchain transactions",
+				zap.Uint32("seqno", seqno),
+				zap.Error(err))
+			continue
+		}
+
+		for _, tx := range transactions {
+			if tx.Account == a && matchTransaction(&tx, lt, back) {
+				// Store in cache for future use
+				s.storeTransaction(tx.Hash, &tx)
+				return &tx, nil
+			}
+		}
 	}
 
 	return nil, fmt.Errorf("not found")
