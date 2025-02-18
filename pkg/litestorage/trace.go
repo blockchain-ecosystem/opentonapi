@@ -2,6 +2,7 @@ package litestorage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,7 +26,13 @@ var (
 	}, []string{"code_hash"})
 )
 
-func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+// Add this type to define trace options
+type TraceOptions struct {
+	FindRoot     bool
+	FindChildren bool
+}
+
+func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256, opts *TraceOptions) (*core.Trace, error) {
 	start := time.Now()
 	traceID := hash.Hex()
 	s.logger.Info("trace request started",
@@ -45,17 +52,14 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("lite client not initialized")
 	}
 
-	ctx, cancel := s.withTimeout(ctx, s.timeout)
-	defer cancel()
-
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_trace").Observe(v)
-	}))
-	defer timer.ObserveDuration()
-
 	// Get initial transaction
 	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
+		if errors.Is(err, core.ErrEntityNotFound) {
+			s.logger.Debug("transaction not found",
+				zap.String("trace_id", traceID))
+			return nil, core.ErrEntityNotFound // This will be converted to 404
+		}
 		s.logger.Error("transaction fetch failed",
 			zap.String("trace_id", traceID),
 			zap.Error(err))
@@ -67,35 +71,61 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		zap.String("account", tx.Account.String()),
 		zap.Uint64("lt", tx.Lt))
 
-	// Find root with logging
-	root, err := s.findRoot(ctx, tx, 0)
-	if err != nil {
-		// If root not found, use current transaction as root
-		s.logger.Warn("using current transaction as root due to error",
-			zap.String("trace_id", traceID),
-			zap.Error(err))
-		root = tx
-	}
-
-	// Get children, handle errors gracefully
-	trace, err := s.recursiveGetChildren(ctx, *root, 0)
-	if err != nil {
-		s.logger.Warn("failed to get children, returning root only",
-			zap.String("trace_id", traceID),
-			zap.Error(err))
-
-		// Return root transaction with empty children
-		return &core.Trace{
-			Transaction: *root,
-			Children:    []*core.Trace{},
-		}, nil
-	}
-
 	s.logger.Info("trace processing completed",
 		zap.String("trace_id", traceID),
 		zap.Duration("duration", time.Since(start)))
 
-	return &trace, nil
+	// If no options provided or just want transaction, return early
+	// if opts == nil || (!opts.FindRoot && !opts.FindChildren) {
+	return &core.Trace{
+		Transaction: *tx,
+		Children:    []*core.Trace{},
+	}, nil
+	// }
+
+	// // Use shorter timeout for subsequent operations
+	// shortCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	// defer cancel()
+
+	// // Find root with logging
+	// root, err := s.findRoot(shortCtx, tx, 0)
+	// if err != nil {
+	// 	if errors.Is(err, context.DeadlineExceeded) {
+	// 		s.logger.Debug("timeout finding root, using current transaction",
+	// 			zap.String("trace_id", traceID))
+	// 		root = tx
+	// 	} else {
+	// 		s.logger.Warn("using current transaction as root due to error",
+	// 			zap.String("trace_id", traceID),
+	// 			zap.Error(err))
+	// 		root = tx
+	// 	}
+	// }
+
+	// // Get children with shorter timeout
+	// trace, err := s.recursiveGetChildren(shortCtx, *root, 0)
+	// if err != nil {
+	// 	if errors.Is(err, context.DeadlineExceeded) {
+	// 		s.logger.Debug("timeout getting children, returning root only",
+	// 			zap.String("trace_id", traceID))
+	// 	} else {
+	// 		s.logger.Warn("failed to get children, returning root only",
+	// 			zap.String("trace_id", traceID),
+	// 			zap.Error(err))
+	// 	}
+
+	// 	// Return root transaction with empty children
+	// 	return &core.Trace{
+	// 		Transaction: *root,
+	// 		Children:    []*core.Trace{},
+	// 	}, nil
+	// }
+
+	// s.logger.Info("trace processing completed",
+	// 	zap.String("trace_id", traceID),
+	// 	zap.Duration("duration", time.Since(start)))
+
+	// return &trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
@@ -205,7 +235,7 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt))) // Add unique search identifier
 
 	// Try cache first
-	tx := s.searchTxInCache(a, lt)
+	tx := s.searchTxInStorage(a, lt)
 	if tx != nil {
 		s.logger.Info("transaction found in cache", // Reduced to debug level
 			zap.String("account", a.String()),
