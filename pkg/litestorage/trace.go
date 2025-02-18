@@ -70,23 +70,30 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 	// Find root with logging
 	root, err := s.findRoot(ctx, tx, 0)
 	if err != nil {
-		s.logger.Error("root search failed",
+		// If root not found, use current transaction as root
+		s.logger.Warn("using current transaction as root due to error",
 			zap.String("trace_id", traceID),
 			zap.Error(err))
-		return nil, fmt.Errorf("failed to find root transaction: %w", err)
+		root = tx
+	}
+
+	// Get children, handle errors gracefully
+	trace, err := s.recursiveGetChildren(ctx, *root, 0)
+	if err != nil {
+		s.logger.Warn("failed to get children, returning root only",
+			zap.String("trace_id", traceID),
+			zap.Error(err))
+
+		// Return root transaction with empty children
+		return &core.Trace{
+			Transaction: *root,
+			Children:    []*core.Trace{},
+		}, nil
 	}
 
 	s.logger.Info("trace processing completed",
 		zap.String("trace_id", traceID),
 		zap.Duration("duration", time.Since(start)))
-
-	// s.logger.Info("getting children recursively")
-	trace, err := s.recursiveGetChildren(ctx, *root, 0)
-	if err != nil {
-		s.logger.Error("failed to get children recursively",
-			zap.Error(err))
-		return nil, fmt.Errorf("failed to get children recursively: %w", err)
-	}
 
 	return &trace, nil
 }
