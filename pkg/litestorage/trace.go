@@ -136,9 +136,21 @@ func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth 
 		return nil, fmt.Errorf("can't find root of nil transaction")
 	}
 
+	s.logger.Info("finding root transaction",
+		zap.String("tx_hash", tx.Hash.Hex()),
+		zap.String("account", tx.Account.String()),
+		zap.Uint64("lt", tx.Lt),
+		zap.Int("depth", depth))
+
 	if tx.InMsg == nil || tx.InMsg.IsExternal() || tx.InMsg.IsEmission() {
+		s.logger.Info("found root transaction - external or emission",
+			zap.String("tx_hash", tx.Hash.Hex()))
 		return tx, nil
 	}
+
+	s.logger.Info("searching parent transaction",
+		zap.String("source_account", tx.InMsg.Source.String()),
+		zap.Uint64("created_lt", tx.InMsg.CreatedLt))
 
 	parentTx, err := s.searchTransactionNearBlock(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
 	if err != nil {
@@ -146,8 +158,15 @@ func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth 
 	}
 
 	if parentTx == nil {
+		s.logger.Info("no parent found, using current as root",
+			zap.String("tx_hash", tx.Hash.Hex()))
 		return tx, nil
 	}
+
+	s.logger.Info("found parent transaction",
+		zap.String("parent_hash", parentTx.Hash.Hex()),
+		zap.String("parent_account", parentTx.Account.String()),
+		zap.Uint64("parent_lt", parentTx.Lt))
 
 	return s.findRoot(ctx, parentTx, depth+1)
 }
