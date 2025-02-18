@@ -156,24 +156,14 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 	if depth > maxDepthLimit {
 		return nil, fmt.Errorf("can't find tx because of depth limit")
 	}
+
+	// Try cache and chain through searchTxInCache
 	tx := s.searchTxInCache(a, lt)
 	if tx != nil {
 		return tx, nil
 	}
-	tx, err := s.searchTransactionInBlock(ctx, a, lt, blockID, back)
-	if err != nil {
-		if back {
-			blockID.Seqno--
-		} else {
-			blockID.Seqno++
-		}
-		tx, err = s.searchTransactionInBlock(ctx, a, lt, blockID, back)
-		if err != nil {
-			return nil, err
-		}
 
-	}
-	return tx, nil
+	return nil, fmt.Errorf("not found")
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {

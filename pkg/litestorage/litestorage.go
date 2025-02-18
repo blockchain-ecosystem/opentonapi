@@ -420,15 +420,41 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 		return tx, nil
 	}
 
-	// If not found in DB, try chain search
-	if err == badger.ErrKeyNotFound {
-		s.logger.Debug("transaction not found in DB, fetching from chain",
-			zap.String("hash", hash.Hex()))
-		return s.fetchTransactionFromChain(ctx, hash)
+	// If not found in DB or other error, try chain search
+	s.logger.Debug("transaction not found in DB, fetching from chain",
+		zap.String("hash", hash.Hex()),
+		zap.Error(err))
+
+	// Get current masterchain info
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
 	}
 
-	// Return other DB errors
-	return nil, fmt.Errorf("failed to get transaction: %w", err)
+	// Search backwards through masterchain and shard blocks
+	for i := 0; i < 1000; i++ {
+		transactions, err := s.GetMasterchainTransactions(ctx, int32(info.Last.Seqno-uint32(i)))
+		if err != nil {
+			s.logger.Error("failed to get masterchain transactions",
+				zap.Uint32("seqno", info.Last.Seqno-uint32(i)),
+				zap.Error(err))
+			continue
+		}
+
+		for _, tx := range transactions {
+			if tx.Hash == hash {
+				// Store found transaction in DB for future use
+				if err := s.storeTransactionBatch([]*core.Transaction{&tx}); err != nil {
+					s.logger.Error("failed to store found transaction",
+						zap.String("hash", hash.Hex()),
+						zap.Error(err))
+				}
+				return &tx, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("transaction not found")
 }
 
 func (s *LiteStorage) StoreTransactionByInMsgLT(accountID string, createLT uint64, hash tongo.Bits256) error {
@@ -902,33 +928,24 @@ func (s *LiteStorage) fetchTransactionFromChain(ctx context.Context, hash tongo.
 
 	blockID := info.Last.ToBlockIdExt()
 
-	// Try current block first
-	transactions, err := s.GetBlockTransactions(ctx, blockID.BlockID)
-	if err == nil {
-		for _, tx := range transactions {
-			if tx.Hash == hash {
-				return tx, nil
-			}
-		}
-	}
-
-	// Search backwards
+	// Search backwards through masterchain and shard blocks
 	for i := 0; i < 1000; i++ {
-		blockID.Seqno--
-
-		transactions, err := s.GetBlockTransactions(ctx, blockID.BlockID)
+		transactions, err := s.GetMasterchainTransactions(ctx, int32(blockID.Seqno))
 		if err != nil {
-			s.logger.Error("failed to get block transactions",
-				zap.String("block_id", blockID.String()),
+			s.logger.Error("failed to get masterchain transactions",
+				zap.Uint32("seqno", blockID.Seqno),
 				zap.Error(err))
+			blockID.Seqno--
 			continue
 		}
 
 		for _, tx := range transactions {
 			if tx.Hash == hash {
-				return tx, nil
+				return &tx, nil
 			}
 		}
+
+		blockID.Seqno--
 	}
 
 	return nil, fmt.Errorf("transaction not found")
