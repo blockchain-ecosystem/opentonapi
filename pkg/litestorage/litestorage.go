@@ -484,7 +484,6 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 		s.logger.Error("failed to get last processed seqno", zap.Error(err))
 		return
 	}
-	s.lastProcessedSeqno = lastSeqno
 
 	// Process seqnos in batches
 	batchSize := 100
@@ -496,6 +495,16 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 
 	// Get the highest seqno from the queue
 	maxSeqno := blocks[len(blocks)-1].ID.Seqno
+
+	if lastSeqno == 0 {
+		lastSeqno = maxSeqno - 2
+		s.lastProcessedSeqno = maxSeqno - 2
+		s.logger.Info("initializing last processed seqno",
+			zap.Uint32("maxSeqno", maxSeqno),
+			zap.Uint32("lastProcessed", lastSeqno))
+	}
+
+	s.lastProcessedSeqno = lastSeqno
 
 	// Process from lastSeqno+1 to maxSeqno
 	for seqno := lastSeqno + 1; seqno <= maxSeqno; seqno += uint32(batchSize) {
