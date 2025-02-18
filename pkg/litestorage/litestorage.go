@@ -386,7 +386,7 @@ func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction)
 }
 
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Info("getting transaction", zap.String("hash", hash.Hex()))
+	// s.logger.Info("getting transaction", zap.String("hash", hash.Hex()))
 
 	// Try DB first with shorter lock scope
 	tx, err := func() (*core.Transaction, error) {
