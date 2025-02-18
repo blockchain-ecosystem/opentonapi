@@ -55,6 +55,20 @@ func (q *BlockQueue) Add(block IDandBlock) {
 	})
 }
 
+func (q *BlockQueue) cleanup() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// Remove processed blocks
+	var newBlocks []IDandBlock
+	for _, block := range q.blocks {
+		if !q.processed[block.ID.Seqno] {
+			newBlocks = append(newBlocks, block)
+		}
+	}
+	q.blocks = newBlocks
+}
+
 func (idx *Indexer) Run(ctx context.Context, channels []chan IDandBlock) {
 	if len(channels) == 0 {
 		idx.logger.Error("no channels provided for indexer")

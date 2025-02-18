@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 
+	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 
 	"github.com/tonkeeper/tongo/contract/elector"
@@ -159,6 +160,7 @@ func findMissedBlocks(ctx context.Context, s storage, id ton.BlockID, prev []ton
 
 func (h *Handler) GetBlockchainMasterchainBlocks(ctx context.Context, params oas.GetBlockchainMasterchainBlocksParams) (*oas.BlockchainBlocks, error) {
 	blockIDs, err := h.blocksDiff(ctx, params.MasterchainSeqno)
+	h.logger.Info("blockIDs", zap.Any("blockIDs", blockIDs))
 	if err != nil {
 		return nil, err
 	}
