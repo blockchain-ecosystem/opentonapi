@@ -1204,7 +1204,7 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 
 func (s *LiteStorage) GetMasterchainTransactions(ctx context.Context, masterchainSeqno int32) ([]core.Transaction, error) {
 	// Add timeout for the entire operation
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 
 	// Get master and shard blocks for this seqno
