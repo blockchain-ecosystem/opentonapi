@@ -2,7 +2,6 @@ package litestorage
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -12,7 +11,6 @@ import (
 	"github.com/tonkeeper/tongo/boc"
 	"go.uber.org/zap"
 
-	"github.com/dgraph-io/badger/v4"
 	"github.com/tonkeeper/opentonapi/pkg/core"
 )
 
@@ -257,51 +255,4 @@ func matchTransaction(tx *core.Transaction, lt uint64, back bool) bool {
 		}
 	}
 	return false
-}
-
-func (s *LiteStorage) getTransactionWithRetry(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
-	s.logger.Info("attempting to get transaction from DB",
-		zap.String("hash", hash.Hex()))
-
-	// Try DB first with shorter lock scope
-	tx, err := func() (*core.Transaction, error) {
-		s.txMutex.RLock()
-		defer s.txMutex.RUnlock()
-
-		var tx core.Transaction
-		err := s.db.View(func(txn *badger.Txn) error {
-			key := append([]byte("tx:"), hash[:]...)
-			item, err := txn.Get(key)
-			if err != nil {
-				if err == badger.ErrKeyNotFound {
-					return err
-				}
-				return fmt.Errorf("db error: %w", err)
-			}
-			return item.Value(func(val []byte) error {
-				return json.Unmarshal(val, &tx)
-			})
-		})
-		if err != nil {
-			return nil, err
-		}
-		return &tx, nil
-	}()
-
-	// If found in DB, return it
-	if err == nil {
-		s.logger.Info("transaction found in DB",
-			zap.String("hash", hash.Hex()))
-		return tx, nil
-	}
-
-	// Only fetch from chain if not found in DB
-	if err == badger.ErrKeyNotFound {
-		// s.logger.Info("transaction not found in DB, fetching from chain",
-		// 	zap.String("hash", hash.Hex()))
-		return s.fetchTransactionFromChain(ctx, hash)
-	}
-
-	// Return other DB errors
-	return nil, fmt.Errorf("failed to get transaction: %w", err)
 }
