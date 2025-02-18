@@ -464,12 +464,54 @@ func (s *LiteStorage) StoreTransactionByInMsgLT(accountID string, createLT uint6
 	})
 }
 
+func (s *LiteStorage) searchTxInCache(a tongo.AccountID, lt uint64) *core.Transaction {
+	s.logger.Debug("searching transaction in cache",
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt))
+
+	hash, err := s.GetTransactionByInMsgLT(a.String(), lt)
+	if err != nil {
+		s.logger.Debug("failed to get transaction by LT",
+			zap.String("account", a.String()),
+			zap.Uint64("lt", lt),
+			zap.Error(err))
+		return nil
+	}
+
+	s.logger.Debug("found transaction hash by LT",
+		zap.String("hash", hash.Hex()))
+
+	tx, err := s.GetTransaction(context.Background(), hash)
+	if err != nil {
+		s.logger.Debug("failed to get transaction by hash",
+			zap.String("hash", hash.Hex()),
+			zap.Error(err))
+		return nil
+	}
+
+	s.logger.Debug("found transaction in cache",
+		zap.String("hash", hash.Hex()),
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt))
+	return tx
+}
+
 func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64) (tongo.Bits256, error) {
 	var hash tongo.Bits256
+	key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
+
+	s.logger.Debug("getting transaction by LT",
+		zap.String("account", accountID),
+		zap.Uint64("lt", createLT),
+		zap.String("key", string(key)))
+
 	err := s.db.View(func(txn *badger.Txn) error {
-		key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
 		item, err := txn.Get(key)
 		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				s.logger.Debug("LT key not found in DB",
+					zap.String("key", string(key)))
+			}
 			return err
 		}
 		return item.Value(func(val []byte) error {
@@ -477,7 +519,16 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 			return nil
 		})
 	})
-	return hash, err
+
+	if err != nil {
+		return hash, err
+	}
+
+	s.logger.Debug("found transaction hash by LT",
+		zap.String("account", accountID),
+		zap.Uint64("lt", createLT),
+		zap.String("hash", hash.Hex()))
+	return hash, nil
 }
 
 func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
@@ -753,18 +804,6 @@ func (s *LiteStorage) GetShardTransactions(ctx context.Context, id tongo.BlockID
 		return nil, err
 	}
 	return core.ExtractTransactions(s.logger, blockID, &block)
-}
-
-func (s *LiteStorage) searchTxInCache(a tongo.AccountID, lt uint64) *core.Transaction {
-	hash, err := s.GetTransactionByInMsgLT(a.String(), lt)
-	if err != nil {
-		return nil
-	}
-	tx, err := s.GetTransaction(context.Background(), hash)
-	if err != nil {
-		return nil
-	}
-	return tx
 }
 
 func (s *LiteStorage) GetStorageProviders(ctx context.Context) ([]core.StorageProvider, error) {
