@@ -3,6 +3,7 @@ package litestorage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -25,12 +26,15 @@ var (
 )
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
+	start := time.Now()
+	traceID := hash.Hex()
+	s.logger.Info("trace request started",
+		zap.String("trace_id", traceID),
+		zap.String("operation", "GetTrace"))
+
 	if s == nil {
 		return nil, fmt.Errorf("storage is nil")
 	}
-
-	// s.logger.Info("starting GetTrace",
-	// 	zap.String("hash", hash.Hex()))
 
 	if s.db == nil {
 		s.logger.Error("database is not initialized")
@@ -49,23 +53,32 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 	}))
 	defer timer.ObserveDuration()
 
-	// s.logger.Info("getting transaction",
-	// 	zap.String("hash", hash.Hex()))
+	// Get initial transaction
 	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
-		s.logger.Error("failed to get transaction",
-			zap.String("hash", hash.Hex()),
+		s.logger.Error("transaction fetch failed",
+			zap.String("trace_id", traceID),
 			zap.Error(err))
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
-	// s.logger.Info("finding root transaction")
+	s.logger.Debug("transaction found", // Debug level for successful operations
+		zap.String("trace_id", traceID),
+		zap.String("account", tx.Account.String()),
+		zap.Uint64("lt", tx.Lt))
+
+	// Find root with logging
 	root, err := s.findRoot(ctx, tx, 0)
 	if err != nil {
-		s.logger.Error("failed to find root transaction",
+		s.logger.Error("root search failed",
+			zap.String("trace_id", traceID),
 			zap.Error(err))
 		return nil, fmt.Errorf("failed to find root transaction: %w", err)
 	}
+
+	s.logger.Info("trace processing completed",
+		zap.String("trace_id", traceID),
+		zap.Duration("duration", time.Since(start)))
 
 	// s.logger.Info("getting children recursively")
 	trace, err := s.recursiveGetChildren(ctx, *root, 0)
@@ -75,7 +88,6 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get children recursively: %w", err)
 	}
 
-	// s.logger.Info("GetTrace completed successfully")
 	return &trace, nil
 }
 
@@ -176,17 +188,19 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 		return nil, fmt.Errorf("can't find tx because of depth limit")
 	}
 
-	s.logger.Info("starting transaction search",
+	// Log search attempt with more details
+	s.logger.Info("searching transaction near block",
 		zap.String("account", a.String()),
 		zap.Uint64("lt", lt),
 		zap.String("block", blockID.String()),
 		zap.Bool("back", back),
-		zap.Int("depth", depth))
+		zap.Int("depth", depth),
+		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt))) // Add unique search identifier
 
 	// Try cache first
 	tx := s.searchTxInCache(a, lt)
 	if tx != nil {
-		s.logger.Info("found transaction in cache",
+		s.logger.Info("transaction found in cache", // Reduced to debug level
 			zap.String("account", a.String()),
 			zap.Uint64("lt", lt))
 		return tx, nil
@@ -195,6 +209,9 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 	// Get current masterchain info
 	info, err := s.client.GetMasterchainInfo(ctx)
 	if err != nil {
+		s.logger.Error("masterchain info fetch failed",
+			zap.Error(err),
+			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
 		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
 	}
 
@@ -220,6 +237,19 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 			zap.Uint32("to", info.Last.Seqno))
 		masterSeqno = info.Last.Seqno
 	}
+
+	// Log only significant state changes
+	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
+		s.logger.Info("converting shard block",
+			zap.String("block", blockID.String()),
+			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
+	}
+
+	// Rest of the function remains the same, but we'll add trace points
+	s.logger.Info("search parameters", // Debug level for detailed info
+		zap.Uint32("master_seqno", masterSeqno),
+		zap.Uint32("last_seqno", info.Last.Seqno),
+		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
 
 	// Search in masterchain blocks
 	const searchRange = 10

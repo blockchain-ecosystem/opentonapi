@@ -1203,34 +1203,59 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 }
 
 func (s *LiteStorage) GetMasterchainTransactions(ctx context.Context, masterchainSeqno int32) ([]core.Transaction, error) {
+	// Add timeout for the entire operation
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	// Get master and shard blocks for this seqno
-	blockIDs, err := s.GetBlockShards(ctx, ton.BlockID{
+	blockID := ton.BlockID{
 		Shard:     0x8000000000000000,
 		Seqno:     uint32(masterchainSeqno),
 		Workchain: -1,
-	})
+	}
+
+	// First try just masterchain block
+	txs, err := s.GetBlockTransactions(ctx, blockID)
 	if err != nil {
+		s.logger.Error("failed to get masterchain transactions",
+			zap.Uint32("seqno", blockID.Seqno),
+			zap.Error(err))
 		return nil, err
 	}
 
-	// Add masterchain block
-	blockIDs = append([]ton.BlockID{{
-		Shard:     0x8000000000000000,
-		Seqno:     uint32(masterchainSeqno),
-		Workchain: -1,
-	}}, blockIDs...)
+	result := make([]core.Transaction, 0, len(txs))
+	for _, tx := range txs {
+		result = append(result, *tx)
+	}
 
-	var result []core.Transaction
-	for _, id := range blockIDs {
-		txs, err := s.GetBlockTransactions(ctx, id)
+	// Only if we have time left, try to get shard blocks
+	select {
+	case <-ctx.Done():
+		return result, nil
+	default:
+		shardIDs, err := s.GetBlockShards(ctx, blockID)
 		if err != nil {
-			s.logger.Error("failed to get block transactions",
-				zap.String("block_id", id.String()),
+			s.logger.Warn("failed to get shard blocks, returning only masterchain txs",
 				zap.Error(err))
-			continue
+			return result, nil
 		}
-		for _, tx := range txs {
-			result = append(result, *tx)
+
+		for _, id := range shardIDs {
+			select {
+			case <-ctx.Done():
+				return result, nil
+			default:
+				shardTxs, err := s.GetBlockTransactions(ctx, id)
+				if err != nil {
+					s.logger.Error("failed to get shard transactions",
+						zap.String("block_id", id.String()),
+						zap.Error(err))
+					continue
+				}
+				for _, tx := range shardTxs {
+					result = append(result, *tx)
+				}
+			}
 		}
 	}
 
