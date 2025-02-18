@@ -415,13 +415,13 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 	// If found in DB, return it
 	if err == nil {
-		s.logger.Debug("transaction found in DB",
+		s.logger.Info("transaction found in DB",
 			zap.String("hash", hash.Hex()))
 		return tx, nil
 	}
 
 	// If not found in DB or other error, try chain search
-	s.logger.Debug("transaction not found in DB, fetching from chain",
+	s.logger.Info("transaction not found in DB, fetching from chain",
 		zap.String("hash", hash.Hex()),
 		zap.Error(err))
 
@@ -465,31 +465,31 @@ func (s *LiteStorage) StoreTransactionByInMsgLT(accountID string, createLT uint6
 }
 
 func (s *LiteStorage) searchTxInCache(a tongo.AccountID, lt uint64) *core.Transaction {
-	s.logger.Debug("searching transaction in cache",
+	s.logger.Info("searching transaction in cache",
 		zap.String("account", a.String()),
 		zap.Uint64("lt", lt))
 
 	hash, err := s.GetTransactionByInMsgLT(a.String(), lt)
 	if err != nil {
-		s.logger.Debug("failed to get transaction by LT",
+		s.logger.Info("failed to get transaction by LT",
 			zap.String("account", a.String()),
 			zap.Uint64("lt", lt),
 			zap.Error(err))
 		return nil
 	}
 
-	s.logger.Debug("found transaction hash by LT",
+	s.logger.Info("found transaction hash by LT",
 		zap.String("hash", hash.Hex()))
 
 	tx, err := s.GetTransaction(context.Background(), hash)
 	if err != nil {
-		s.logger.Debug("failed to get transaction by hash",
+		s.logger.Info("failed to get transaction by hash",
 			zap.String("hash", hash.Hex()),
 			zap.Error(err))
 		return nil
 	}
 
-	s.logger.Debug("found transaction in cache",
+	s.logger.Info("found transaction in cache",
 		zap.String("hash", hash.Hex()),
 		zap.String("account", a.String()),
 		zap.Uint64("lt", lt))
@@ -500,7 +500,7 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 	var hash tongo.Bits256
 	key := []byte("lt_" + accountID + "_" + fmt.Sprint(createLT))
 
-	s.logger.Debug("getting transaction by LT",
+	s.logger.Info("getting transaction by LT",
 		zap.String("account", accountID),
 		zap.Uint64("lt", createLT),
 		zap.String("key", string(key)))
@@ -509,7 +509,7 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 		item, err := txn.Get(key)
 		if err != nil {
 			if err == badger.ErrKeyNotFound {
-				s.logger.Debug("LT key not found in DB",
+				s.logger.Info("LT key not found in DB",
 					zap.String("key", string(key)))
 			}
 			return err
@@ -524,7 +524,7 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 		return hash, err
 	}
 
-	s.logger.Debug("found transaction hash by LT",
+	s.logger.Info("found transaction hash by LT",
 		zap.String("account", accountID),
 		zap.Uint64("lt", createLT),
 		zap.String("hash", hash.Hex()))

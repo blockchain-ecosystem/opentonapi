@@ -157,23 +157,63 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 		return nil, fmt.Errorf("can't find tx because of depth limit")
 	}
 
+	s.logger.Info("starting transaction search",
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt),
+		zap.String("block", blockID.String()),
+		zap.Bool("back", back),
+		zap.Int("depth", depth))
+
 	// Try cache first
 	tx := s.searchTxInCache(a, lt)
 	if tx != nil {
+		s.logger.Info("found transaction in cache",
+			zap.String("account", a.String()),
+			zap.Uint64("lt", lt))
 		return tx, nil
 	}
 
-	// Search in masterchain and shard blocks
-	const searchRange = 10 // Look 5 blocks in each direction
-	currentSeqno := blockID.Seqno
+	// Get current masterchain info
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
 
+	// Convert shard block seqno to masterchain seqno
+	masterSeqno := blockID.Seqno
+	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
+		s.logger.Info("converting shard block to masterchain seqno",
+			zap.String("block", blockID.String()))
+
+		header, err := s.GetBlockHeader(ctx, blockID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block header: %w", err)
+		}
+		masterSeqno = header.MasterRef.Seqno
+		s.logger.Info("converted to masterchain seqno",
+			zap.Uint32("master_seqno", masterSeqno))
+	}
+
+	// Ensure we don't exceed bounds
+	if masterSeqno > info.Last.Seqno {
+		s.logger.Info("adjusting seqno to last known masterchain block",
+			zap.Uint32("from", masterSeqno),
+			zap.Uint32("to", info.Last.Seqno))
+		masterSeqno = info.Last.Seqno
+	}
+
+	// Search in masterchain blocks
+	const searchRange = 10
 	for i := 0; i < searchRange; i++ {
-		seqno := currentSeqno
+		seqno := masterSeqno
 		if back {
 			seqno -= uint32(i)
 		} else {
 			seqno += uint32(i)
 		}
+
+		s.logger.Info("searching in masterchain block",
+			zap.Uint32("seqno", seqno))
 
 		transactions, err := s.GetMasterchainTransactions(ctx, int32(seqno))
 		if err != nil {
@@ -183,15 +223,24 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 			continue
 		}
 
+		s.logger.Info("checking transactions in block",
+			zap.Uint32("seqno", seqno),
+			zap.Int("tx_count", len(transactions)))
+
 		for _, tx := range transactions {
 			if tx.Account == a && matchTransaction(&tx, lt, back) {
-				// Store in cache for future use
-				s.storeTransaction(tx.Hash, &tx)
+				s.logger.Info("found matching transaction",
+					zap.String("account", a.String()),
+					zap.Uint64("lt", lt),
+					zap.String("hash", tx.Hash.Hex()))
 				return &tx, nil
 			}
 		}
 	}
 
+	s.logger.Info("transaction not found",
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt))
 	return nil, fmt.Errorf("not found")
 }
 
