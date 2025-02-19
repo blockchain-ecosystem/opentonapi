@@ -415,8 +415,8 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 	// If found in DB, return it
 	if err == nil {
-		s.logger.Info("transaction found in DB",
-			zap.String("hash", hash.Hex()))
+		// s.logger.Info("transaction found in DB",
+		// 	zap.String("hash", hash.Hex()))
 		return tx, nil
 	}
 
