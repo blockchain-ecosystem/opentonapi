@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -29,11 +28,11 @@ var (
 // Add this type to define trace options
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	start := time.Now()
+	// start := time.Now()
 	traceID := hash.Hex()
-	s.logger.Info("trace request started",
-		zap.String("trace_id", traceID),
-		zap.String("operation", "GetTrace"))
+	// s.logger.Info("trace request started",
+	// 	zap.String("trace_id", traceID),
+	// 	zap.String("operation", "GetTrace"))
 
 	if s == nil {
 		return nil, fmt.Errorf("storage is nil")
@@ -62,14 +61,14 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
-	s.logger.Debug("transaction found", // Debug level for successful operations
-		zap.String("trace_id", traceID),
-		zap.String("account", tx.Account.String()),
-		zap.Uint64("lt", tx.Lt))
+	// s.logger.Debug("transaction found", // Debug level for successful operations
+	// 	zap.String("trace_id", traceID),
+	// 	zap.String("account", tx.Account.String()),
+	// 	zap.Uint64("lt", tx.Lt))
 
-	s.logger.Info("trace processing completed",
-		zap.String("trace_id", traceID),
-		zap.Duration("duration", time.Since(start)))
+	// s.logger.Info("trace processing completed",
+	// 	zap.String("trace_id", traceID),
+	// 	zap.Duration("duration", time.Since(start)))
 
 	// If no options provided or just want transaction, return early
 	// if opts == nil || (!opts.FindRoot && !opts.FindChildren) {
