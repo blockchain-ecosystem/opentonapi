@@ -1317,7 +1317,7 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 			}
 
 			s.blockQueue.Add(block)
-
+			
 			// Add retry logic
 			var processErr error
 			for attempts := 0; attempts < 3; attempts++ {
@@ -1333,11 +1333,11 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 				processErr = nil
 				break
 			}
-
+			
 			if processErr != nil {
 				return processErr
 			}
-
+			
 			s.logger.Info("processed seqno", zap.Uint32("seqno", seqno))
 		}
 	}

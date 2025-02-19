@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -28,7 +29,7 @@ var (
 // Add this type to define trace options
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	// start := time.Now()
+	start := time.Now()
 	traceID := hash.Hex()
 	// s.logger.Info("trace request started",
 	// 	zap.String("trace_id", traceID),
@@ -61,66 +62,66 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 
-	// s.logger.Debug("transaction found", // Debug level for successful operations
-	// 	zap.String("trace_id", traceID),
-	// 	zap.String("account", tx.Account.String()),
-	// 	zap.Uint64("lt", tx.Lt))
+	s.logger.Debug("transaction found", // Debug level for successful operations
+		zap.String("trace_id", traceID),
+		zap.String("account", tx.Account.String()),
+		zap.Uint64("lt", tx.Lt))
 
-	// s.logger.Info("trace processing completed",
-	// 	zap.String("trace_id", traceID),
-	// 	zap.Duration("duration", time.Since(start)))
+	s.logger.Info("trace processing completed",
+		zap.String("trace_id", traceID),
+		zap.Duration("duration", time.Since(start)))
 
 	// If no options provided or just want transaction, return early
 	// if opts == nil || (!opts.FindRoot && !opts.FindChildren) {
-	return &core.Trace{
-		Transaction: *tx,
-		Children:    []*core.Trace{},
-	}, nil
-	// }
-
-	// // Use shorter timeout for subsequent operations
-	// shortCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	// defer cancel()
-
-	// // Find root with logging
-	// root, err := s.findRoot(shortCtx, tx, 0)
-	// if err != nil {
-	// 	if errors.Is(err, context.DeadlineExceeded) {
-	// 		s.logger.Debug("timeout finding root, using current transaction",
-	// 			zap.String("trace_id", traceID))
-	// 		root = tx
-	// 	} else {
-	// 		s.logger.Warn("using current transaction as root due to error",
-	// 			zap.String("trace_id", traceID),
-	// 			zap.Error(err))
-	// 		root = tx
-	// 	}
-	// }
-
-	// // Get children with shorter timeout
-	// trace, err := s.recursiveGetChildren(shortCtx, *root, 0)
-	// if err != nil {
-	// 	if errors.Is(err, context.DeadlineExceeded) {
-	// 		s.logger.Debug("timeout getting children, returning root only",
-	// 			zap.String("trace_id", traceID))
-	// 	} else {
-	// 		s.logger.Warn("failed to get children, returning root only",
-	// 			zap.String("trace_id", traceID),
-	// 			zap.Error(err))
-	// 	}
-
-	// 	// Return root transaction with empty children
 	// 	return &core.Trace{
-	// 		Transaction: *root,
+	// 		Transaction: *tx,
 	// 		Children:    []*core.Trace{},
 	// 	}, nil
 	// }
 
-	// s.logger.Info("trace processing completed",
-	// 	zap.String("trace_id", traceID),
-	// 	zap.Duration("duration", time.Since(start)))
+	// Use shorter timeout for subsequent operations
+	shortCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 
-	// return &trace, nil
+	// Find root with logging
+	root, err := s.findRoot(shortCtx, tx, 0)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Debug("timeout finding root, using current transaction",
+				zap.String("trace_id", traceID))
+			root = tx
+		} else {
+			s.logger.Warn("using current transaction as root due to error",
+				zap.String("trace_id", traceID),
+				zap.Error(err))
+			root = tx
+		}
+	}
+
+	// Get children with shorter timeout
+	trace, err := s.recursiveGetChildren(shortCtx, *root, 0)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.logger.Debug("timeout getting children, returning root only",
+				zap.String("trace_id", traceID))
+		} else {
+			s.logger.Warn("failed to get children, returning root only",
+				zap.String("trace_id", traceID),
+				zap.Error(err))
+		}
+
+		// Return root transaction with empty children
+		return &core.Trace{
+			Transaction: *root,
+			Children:    []*core.Trace{},
+		}, nil
+	}
+
+	s.logger.Info("trace processing completed",
+		zap.String("trace_id", traceID),
+		zap.Duration("duration", time.Since(start)))
+
+	return &trace, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {
