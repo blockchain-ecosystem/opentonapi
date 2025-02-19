@@ -1074,7 +1074,7 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 	}
 
 	// Process seqnos in batches
-	batchSize := 100
+	batchSize := 1000
 	blocks := s.blockQueue.GetOrderedBlocks()
 
 	if len(blocks) == 0 {
@@ -1156,7 +1156,7 @@ func (s *LiteStorage) processSeqnoBatchAtomically(ctx context.Context, startSeqn
 }
 
 func (s *LiteStorage) processTransactions(txs []*core.Transaction) error {
-	const batchSize = 100
+	const batchSize = 1000
 	for i := 0; i < len(txs); i += batchSize {
 		end := i + batchSize
 		if end > len(txs) {
@@ -1195,10 +1195,10 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 				return err
 			}
 
-			s.logger.Info("stored transaction in batch",
-				zap.String("hash", tx.Hash.Hex()),
-				zap.String("account", tx.Account.String()),
-				zap.Uint64("lt", tx.Lt))
+			// s.logger.Info("stored transaction in batch",
+			// 	zap.String("hash", tx.Hash.Hex()),
+			// 	zap.String("account", tx.Account.String()),
+			// 	zap.Uint64("lt", tx.Lt))
 		}
 		return nil
 	})

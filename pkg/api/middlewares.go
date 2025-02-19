@@ -20,7 +20,7 @@ func ogenLoggingMiddleware(logger *zap.Logger) middleware.Middleware {
 			zap.String("operation", req.OperationName),
 			zap.String("path", req.Raw.URL.Path),
 		)
-		logger.Info("Handling request")
+		// logger.Info("Handling request")
 		resp, err := next(req)
 		if err != nil {
 			if oasError, ok := err.(*oas.ErrorStatusCode); ok && oasError.StatusCode == http.StatusInternalServerError {
@@ -29,7 +29,7 @@ func ogenLoggingMiddleware(logger *zap.Logger) middleware.Middleware {
 				logger.Info("Fail", zap.Error(err))
 			}
 		} else {
-			logger.Info("Success")
+			// logger.Info("Success")
 		}
 		return resp, err
 	}
