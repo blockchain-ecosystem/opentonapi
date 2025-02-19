@@ -27,12 +27,8 @@ var (
 )
 
 // Add this type to define trace options
-type TraceOptions struct {
-	FindRoot     bool
-	FindChildren bool
-}
 
-func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256, opts *TraceOptions) (*core.Trace, error) {
+func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
 	start := time.Now()
 	traceID := hash.Hex()
 	s.logger.Info("trace request started",
