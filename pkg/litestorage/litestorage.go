@@ -1236,6 +1236,7 @@ func (s *LiteStorage) GetMasterchainTransactions(ctx context.Context, masterchai
 		return result, nil
 	default:
 		shardIDs, err := s.GetBlockShards(ctx, blockID)
+		s.logger.Info("shardIDs", zap.Any("shardIDs", shardIDs))
 		if err != nil {
 			s.logger.Warn("failed to get shard blocks, returning only masterchain txs",
 				zap.Error(err))
