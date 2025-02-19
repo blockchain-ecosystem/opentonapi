@@ -534,6 +534,9 @@ func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64)
 }
 
 func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
+	ticker := time.NewTicker(time.Minute) // Check every minute for new blocks
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -542,9 +545,12 @@ func (s *LiteStorage) run(ctx context.Context, ch <-chan indexer.IDandBlock) {
 			if block.Block == nil {
 				continue
 			}
-
 			s.blockQueue.Add(block)
 			s.processQueuedSeqno(ctx)
+		case <-ticker.C:
+			if err := s.ForwardProcessSeqno(ctx); err != nil {
+				s.logger.Error("forward process failed", zap.Error(err))
+			}
 		}
 	}
 }
@@ -1058,7 +1064,7 @@ func (s *LiteStorage) getBlockWithRetry(ctx context.Context, blockID tongo.Block
 	return blockIDExt, block, err
 }
 
-func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
+func (s *LiteStorage) processQueuedSeqno(ctx context.Context) error {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("recovered from panic", zap.Any("error", r))
@@ -1070,18 +1076,14 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 	lastSeqno, err := s.getLastProcessedSeqno()
 	if err != nil {
 		s.logger.Error("failed to get last processed seqno", zap.Error(err))
-		return
+		return err
 	}
 
-	// Process seqnos in batches
-	batchSize := 1000
 	blocks := s.blockQueue.GetOrderedBlocks()
-
 	if len(blocks) == 0 {
-		return
+		return nil
 	}
 
-	// Get the highest seqno from the queue
 	maxSeqno := blocks[len(blocks)-1].ID.Seqno
 
 	if lastSeqno == 0 {
@@ -1094,9 +1096,8 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 
 	s.lastProcessedSeqno = lastSeqno
 
-	// Process from lastSeqno+1 to maxSeqno
-	for seqno := lastSeqno + 1; seqno <= maxSeqno; seqno += uint32(batchSize) {
-		endSeqno := seqno + uint32(batchSize-1)
+	for seqno := lastSeqno + 1; seqno <= maxSeqno; seqno += uint32(1000) {
+		endSeqno := seqno + uint32(999)
 		if endSeqno > maxSeqno {
 			endSeqno = maxSeqno
 		}
@@ -1106,9 +1107,10 @@ func (s *LiteStorage) processQueuedSeqno(ctx context.Context) {
 				zap.Error(err),
 				zap.Uint32("start_seqno", seqno),
 				zap.Uint32("end_seqno", endSeqno))
-			return
+			return err
 		}
 	}
+	return nil
 }
 
 func (s *LiteStorage) processSeqnoBatchAtomically(ctx context.Context, startSeqno, endSeqno uint32) error {
@@ -1210,7 +1212,7 @@ func (s *LiteStorage) GetMasterchainTransactions(ctx context.Context, masterchai
 	defer cancel()
 
 	// Get master and shard blocks for this seqno
-	blockID := ton.BlockID{
+	blockID := tongo.BlockID{
 		Shard:     0x8000000000000000,
 		Seqno:     uint32(masterchainSeqno),
 		Workchain: -1,
@@ -1282,6 +1284,61 @@ func (s *LiteStorage) verifyTransactions(txs []core.Transaction, seqno uint32) e
 	for _, tx := range txs {
 		if tx.BlockID.Seqno != seqno {
 			return fmt.Errorf("transaction from wrong seqno: expected %d, got %d", seqno, tx.BlockID.Seqno)
+		}
+	}
+	return nil
+}
+
+func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
+	// Get current masterchain info
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	s.seqnoMutex.RLock()
+	lastProcessed := s.lastProcessedSeqno
+	s.seqnoMutex.RUnlock()
+
+	// Process from last processed to current
+	for seqno := lastProcessed + 1; seqno <= info.Last.Seqno; seqno++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			block := indexer.IDandBlock{
+				ID: tongo.BlockIDExt{
+					BlockID: tongo.BlockID{
+						Workchain: -1,
+						Shard:     0x8000000000000000,
+						Seqno:     seqno,
+					},
+				},
+			}
+
+			s.blockQueue.Add(block)
+
+			// Add retry logic
+			var processErr error
+			for attempts := 0; attempts < 3; attempts++ {
+				if err := s.processQueuedSeqno(ctx); err != nil {
+					processErr = err
+					s.logger.Error("failed to process seqno, retrying",
+						zap.Uint32("seqno", seqno),
+						zap.Error(err),
+						zap.Int("attempt", attempts+1))
+					time.Sleep(time.Second * time.Duration(attempts+1))
+					continue
+				}
+				processErr = nil
+				break
+			}
+
+			if processErr != nil {
+				return processErr
+			}
+
+			s.logger.Info("processed seqno", zap.Uint32("seqno", seqno))
 		}
 	}
 	return nil
