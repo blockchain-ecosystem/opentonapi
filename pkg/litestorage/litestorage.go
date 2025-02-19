@@ -1249,16 +1249,20 @@ func (s *LiteStorage) GetMasterchainTransactions(ctx context.Context, masterchai
 				return result, nil
 			default:
 				shardTxs, err := s.GetBlockTransactions(ctx, id)
-				s.logger.Info("Transactions in shard", zap.Any("id", id), zap.Any("have amount of transactions", len(shardTxs)))
-				for _, tx := range shardTxs {
-					s.logger.Info("Transaction hash", zap.String("hash", tx.Hash.Hex()))
-				}
 				if err != nil {
 					s.logger.Error("failed to get shard transactions",
 						zap.String("block_id", id.String()),
 						zap.Error(err))
 					continue
 				}
+
+				// Move logging to debug level and only log if needed
+				if len(shardTxs) > 0 {
+					s.logger.Debug("processing shard transactions",
+						zap.Any("id", id),
+						zap.Int("transaction_count", len(shardTxs)))
+				}
+
 				for _, tx := range shardTxs {
 					result = append(result, *tx)
 				}
