@@ -318,6 +318,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 		blockQueue:      NewBlockQueue(),
 		cleanupInterval: time.Hour, // default 1 hour interval
 		maxBatchSize:    1000,
+		traceCache:      &sync.Map{},
 	}
 	s.knownAccounts["tf_pools"] = o.tfPools
 	s.knownAccounts["jettons"] = o.jettons
