@@ -29,8 +29,14 @@ var (
 // Add this type to define trace options
 
 func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.Trace, error) {
-	start := time.Now()
 	traceID := hash.Hex()
+
+	// Try cache first
+	if cached, ok := s.traceCache.Load(traceID); ok {
+		return cached.(*core.Trace), nil
+	}
+
+	start := time.Now()
 	// s.logger.Info("trace request started",
 	// 	zap.String("trace_id", traceID),
 	// 	zap.String("operation", "GetTrace"))
@@ -117,11 +123,9 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 		}, nil
 	}
 
-	s.logger.Info("trace processing completed",
-		zap.String("trace_id", traceID),
-		zap.Duration("duration", time.Since(start)))
-
-	return &trace, nil
+	result := &trace
+	s.traceCache.Store(traceID, result)
+	return result, nil
 }
 
 func (s *LiteStorage) SearchTraces(ctx context.Context, a tongo.AccountID, limit int, beforeLT, startTime, endTime *int64, initiator bool) ([]core.TraceID, error) {

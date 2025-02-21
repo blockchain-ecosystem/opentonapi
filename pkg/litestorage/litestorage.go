@@ -117,6 +117,8 @@ type LiteStorage struct {
 	}
 	metrics      *storageMetrics
 	cleanupMutex sync.Mutex
+
+	traceCache *sync.Map
 }
 
 type BlockQueue struct {
@@ -1298,6 +1300,7 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 
 			// Add retry logic
 			var processErr error
+			backoff := 500 * time.Millisecond // Start with longer initial backoff
 			for attempts := 0; attempts < 3; attempts++ {
 				if err := s.processQueuedSeqno(ctx); err != nil {
 					processErr = err
@@ -1305,7 +1308,8 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 						zap.Uint32("seqno", seqno),
 						zap.Error(err),
 						zap.Int("attempt", attempts+1))
-					time.Sleep(time.Second * time.Duration(attempts+1))
+					time.Sleep(backoff)
+					backoff *= 2 // Exponential backoff
 					continue
 				}
 				processErr = nil
