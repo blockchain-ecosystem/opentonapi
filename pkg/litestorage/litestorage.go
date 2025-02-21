@@ -331,14 +331,14 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 				zap.Error(err))
 		}
 	})
-	iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: s.maxGoroutines}
-	iterator.ForEach(o.preloadAccounts, func(accountID *tongo.AccountID) {
-		if err := s.preloadAccount(*accountID); err != nil {
-			log.Error("failed to preload account",
-				zap.String("accountID", accountID.String()),
-				zap.Error(err))
-		}
-	})
+	// iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: s.maxGoroutines}
+	// iterator.ForEach(o.preloadAccounts, func(accountID *tongo.AccountID) {
+	// 	if err := s.preloadAccount(*accountID); err != nil {
+	// 		log.Error("failed to preload account",
+	// 			zap.String("accountID", accountID.String()),
+	// 			zap.Error(err))
+	// 	}
+	// })
 	go s.run(context.Background(), o.blockCh)
 	go s.runBlockchainConfigUpdate(5 * time.Second)
 

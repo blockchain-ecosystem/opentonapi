@@ -150,7 +150,7 @@ func (s *LiteStorage) recursiveGetChildren(ctx context.Context, tx core.Transact
 			continue
 		}
 
-		childTx, err := s.searchTransactionNearBlock(ctx, *m.Destination, m.CreatedLt, tx.BlockID, false, depth+1)
+		childTx, err := s.searchTransactionNearBlockV2(ctx, *m.Destination, m.CreatedLt, tx.BlockID, false, depth+1)
 		if err != nil {
 			return core.Trace{}, fmt.Errorf("failed to find child tx: %w", err)
 		}
@@ -201,7 +201,7 @@ func (s *LiteStorage) findRoot(ctx context.Context, tx *core.Transaction, depth 
 		zap.String("source_account", tx.InMsg.Source.String()),
 		zap.Uint64("created_lt", tx.InMsg.CreatedLt))
 
-	parentTx, err := s.searchTransactionNearBlock(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
+	parentTx, err := s.searchTransactionNearBlockV2(ctx, *tx.InMsg.Source, tx.InMsg.CreatedLt, tx.BlockID, true, depth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find parent transaction: %w", err)
 	}
@@ -260,6 +260,116 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 
 	}
 	return tx, nil
+}
+
+func (s *LiteStorage) searchTransactionNearBlockV2(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool, depth int) (*core.Transaction, error) {
+	if depth > maxDepthLimit {
+		return nil, fmt.Errorf("can't find tx because of depth limit")
+	}
+
+	// Log search attempt with more details
+	s.logger.Info("searching transaction near block",
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt),
+		zap.String("block", blockID.String()),
+		zap.Bool("back", back),
+		zap.Int("depth", depth),
+		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt))) // Add unique search identifier
+
+	// Try cache first
+	tx := s.searchTxInStorage(a, lt)
+	if tx != nil {
+		s.logger.Info("transaction found in cache", // Reduced to debug level
+			zap.String("account", a.String()),
+			zap.Uint64("lt", lt))
+		return tx, nil
+	}
+
+	// Get current masterchain info
+	info, err := s.client.GetMasterchainInfo(ctx)
+	if err != nil {
+		s.logger.Error("masterchain info fetch failed",
+			zap.Error(err),
+			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
+		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
+	}
+
+	// Convert shard block seqno to masterchain seqno
+	masterSeqno := blockID.Seqno
+	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
+		s.logger.Info("converting shard block to masterchain seqno",
+			zap.String("block", blockID.String()))
+
+		header, err := s.GetBlockHeader(ctx, blockID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block header: %w", err)
+		}
+		masterSeqno = header.MasterRef.Seqno
+		s.logger.Info("converted to masterchain seqno",
+			zap.Uint32("master_seqno", masterSeqno))
+	}
+
+	// Ensure we don't exceed bounds
+	if masterSeqno > info.Last.Seqno {
+		s.logger.Info("adjusting seqno to last known masterchain block",
+			zap.Uint32("from", masterSeqno),
+			zap.Uint32("to", info.Last.Seqno))
+		masterSeqno = info.Last.Seqno
+	}
+
+	// Log only significant state changes
+	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
+		s.logger.Info("converting shard block",
+			zap.String("block", blockID.String()),
+			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
+	}
+
+	// Rest of the function remains the same, but we'll add trace points
+	s.logger.Info("search parameters", // Debug level for detailed info
+		zap.Uint32("master_seqno", masterSeqno),
+		zap.Uint32("last_seqno", info.Last.Seqno),
+		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
+
+	// Search in masterchain blocks
+	const searchRange = 10
+	for i := 0; i < searchRange; i++ {
+		seqno := masterSeqno
+		if back {
+			seqno -= uint32(i)
+		} else {
+			seqno += uint32(i)
+		}
+
+		s.logger.Info("searching in masterchain block",
+			zap.Uint32("seqno", seqno))
+
+		transactions, err := s.GetMasterchainTransactions(ctx, int32(seqno))
+		if err != nil {
+			s.logger.Error("failed to get masterchain transactions",
+				zap.Uint32("seqno", seqno),
+				zap.Error(err))
+			continue
+		}
+
+		s.logger.Info("checking transactions in block",
+			zap.Uint32("seqno", seqno),
+			zap.Int("tx_count", len(transactions)))
+
+		for _, tx := range transactions {
+			if tx.Account == a && matchTransaction(&tx, lt, back) {
+				s.logger.Info("found matching transaction",
+					zap.String("account", a.String()),
+					zap.Uint64("lt", lt),
+					zap.String("hash", tx.Hash.Hex()))
+				return &tx, nil
+			}
+		}
+	}
+
+	s.logger.Info("transaction not found",
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt))
+	return nil, fmt.Errorf("not found")
 }
 
 func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
