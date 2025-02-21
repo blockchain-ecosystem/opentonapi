@@ -239,121 +239,133 @@ func (s *LiteStorage) searchTransactionNearBlock(ctx context.Context, a tongo.Ac
 		return tx, nil
 	}
 
-	// Get current masterchain info
-	info, err := s.client.GetMasterchainInfo(ctx)
+	// Try current block
+	tx, err := s.searchTransactionInBlock(ctx, a, lt, blockID, back)
+
+	// Try next/previous block
 	if err != nil {
-		s.logger.Error("masterchain info fetch failed",
-			zap.Error(err),
-			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
-		return nil, fmt.Errorf("failed to get masterchain info: %w", err)
-	}
-
-	// Convert shard block seqno to masterchain seqno
-	masterSeqno := blockID.Seqno
-	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
-		s.logger.Info("converting shard block to masterchain seqno",
-			zap.String("block", blockID.String()))
-
-		header, err := s.GetBlockHeader(ctx, blockID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get block header: %w", err)
-		}
-		masterSeqno = header.MasterRef.Seqno
-		s.logger.Info("converted to masterchain seqno",
-			zap.Uint32("master_seqno", masterSeqno))
-	}
-
-	// Ensure we don't exceed bounds
-	if masterSeqno > info.Last.Seqno {
-		s.logger.Info("adjusting seqno to last known masterchain block",
-			zap.Uint32("from", masterSeqno),
-			zap.Uint32("to", info.Last.Seqno))
-		masterSeqno = info.Last.Seqno
-	}
-
-	// Log only significant state changes
-	if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
-		s.logger.Info("converting shard block",
-			zap.String("block", blockID.String()),
-			zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
-	}
-
-	// Rest of the function remains the same, but we'll add trace points
-	s.logger.Info("search parameters", // Debug level for detailed info
-		zap.Uint32("master_seqno", masterSeqno),
-		zap.Uint32("last_seqno", info.Last.Seqno),
-		zap.String("search_id", fmt.Sprintf("%s_%d", a.String(), lt)))
-
-	// Search in masterchain blocks
-	const searchRange = 10
-	for i := 0; i < searchRange; i++ {
-		seqno := masterSeqno
 		if back {
-			seqno -= uint32(i)
+			blockID.Seqno--
 		} else {
-			seqno += uint32(i)
+			blockID.Seqno++
+		}
+		tx, err = s.searchTransactionInBlock(ctx, a, lt, blockID, back)
+		if err != nil {
+			return nil, err
 		}
 
-		s.logger.Info("searching in masterchain block",
-			zap.Uint32("seqno", seqno))
+	}
+	return tx, nil
+}
 
-		transactions, err := s.GetMasterchainTransactions(ctx, int32(seqno))
+func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
+	blockIDExt, _, err := s.client.LookupBlock(ctx, blockID, 1, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Info("searching transaction in block",
+		zap.String("block_id", blockIDExt.String()),
+		zap.String("account", a.String()),
+		zap.Uint64("lt", lt),
+		zap.Bool("back", back))
+
+	block, prs := s.blockCache.Load(blockIDExt)
+	if !prs {
+		b, err := s.client.GetBlock(ctx, blockIDExt)
 		if err != nil {
-			s.logger.Error("failed to get masterchain transactions",
-				zap.Uint32("seqno", seqno),
-				zap.Error(err))
+			return nil, err
+		}
+		s.blockCache.Store(blockIDExt, &b)
+		block = &b
+	}
+
+	txs := block.AllTransactions()
+	s.logger.Info("found transactions in block",
+		zap.String("block_id", blockIDExt.String()),
+		zap.Int("transaction_count", len(txs)))
+
+	for _, tx := range txs {
+		if tx.AccountAddr != a.Address {
 			continue
 		}
-
-		s.logger.Info("checking transactions in block",
-			zap.Uint32("seqno", seqno),
-			zap.Int("tx_count", len(transactions)))
-
-		for _, tx := range transactions {
-			if tx.Account == a && matchTransaction(&tx, lt, back) {
-				s.logger.Info("found matching transaction",
-					zap.String("account", a.String()),
-					zap.Uint64("lt", lt),
-					zap.String("hash", tx.Hash.Hex()))
-				return &tx, nil
+		inMsg := tx.Msgs.InMsg
+		if !back && inMsg.Exists && inMsg.Value.Value.Info.IntMsgInfo != nil && inMsg.Value.Value.Info.IntMsgInfo.CreatedLt == lt {
+			s.logger.Debug("found matching transaction by incoming message",
+				zap.String("block_id", blockIDExt.String()),
+				zap.String("account", a.String()),
+				zap.Uint64("lt", lt))
+			return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
+		}
+		if back {
+			for _, m := range tx.Msgs.OutMsgs.Values() {
+				if m.Value.Info.IntMsgInfo != nil && m.Value.Info.IntMsgInfo.CreatedLt == lt {
+					s.logger.Debug("found matching transaction by outgoing message",
+						zap.String("block_id", blockIDExt.String()),
+						zap.String("account", a.String()),
+						zap.Uint64("lt", lt))
+					return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
+				}
 			}
 		}
 	}
 
-	s.logger.Info("transaction not found",
+	s.logger.Debug("no matching transaction found in block",
+		zap.String("block_id", blockIDExt.String()),
 		zap.String("account", a.String()),
 		zap.Uint64("lt", lt))
 	return nil, fmt.Errorf("not found")
 }
 
-func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
-	// Get block first without holding txMutex
-	blockIDExt, block, err := s.getBlockWithRetry(ctx, blockID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block: %w", err)
-	}
+func (s *LiteStorage) searchTransactionInBlockV2(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
+	// // Convert shard block seqno to masterchain seqno if needed
+	// masterSeqno := blockID.Seqno
+	// if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
+	// 	header, err := s.GetBlockHeader(ctx, blockID)
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("failed to get block header: %w", err)
+	// 	}
+	// 	masterSeqno = header.MasterRef.Seqno
+	// }
 
-	s.txMutex.RLock()
-	defer s.txMutex.RUnlock()
+	// blockIDExt := tongo.BlockIDExt{
+	// 	BlockID: tongo.BlockID{
+	// 		Workchain: -1,
+	// 		Shard:     0x8000000000000000,
+	// 		Seqno:     masterSeqno,
+	// 	},
+	// }
 
-	for _, tx := range block.AllTransactions() {
-		if tx.AccountAddr != a.Address {
-			continue
-		}
+	// // Try to get block from DB first
+	// block, err := s.getBlock(blockIDExt)
 
-		transaction, err := safeConvertTransaction(a.Workchain, tongo.Transaction{
-			BlockID:     blockIDExt,
-			Transaction: *tx,
-		}, nil)
-		if err != nil {
-			s.logger.Error("failed to process transaction", zap.Error(err))
-			continue
-		}
+	// // If not found in DB or DB lookup failed, try chain
+	// transactions, err := s.GetMasterchainTransactions(ctx, int32(masterSeqno))
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to get masterchain transactions: %w", err)
+	// }
 
-		if matchTransaction(transaction, lt, back) {
-			return transaction, nil
-		}
-	}
+	// // Search for matching transaction
+	// if err == nil {
+	// 	// Search in block from DB
+	// 	for _, tx := range transactions {
+	// 		if tx.AccountAddr != a.Address {
+	// 			continue
+	// 		}
+	// 		inMsg := tx.Msgs.InMsg
+	// 		if !back && inMsg.Exists && inMsg.Value.Value.Info.IntMsgInfo != nil && inMsg.Value.Value.Info.IntMsgInfo.CreatedLt == lt {
+	// 			return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
+	// 		}
+	// 		if back {
+	// 			for _, m := range tx.Msgs.OutMsgs.Values() {
+	// 				if m.Value.Info.IntMsgInfo != nil && m.Value.Info.IntMsgInfo.CreatedLt == lt {
+	// 					return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+	// }
+
 	return nil, fmt.Errorf("not found")
 }
 

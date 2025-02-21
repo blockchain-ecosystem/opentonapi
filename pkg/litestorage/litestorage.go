@@ -933,28 +933,6 @@ func (s *LiteStorage) getClient() (*liteapi.Client, func()) {
 	}
 }
 
-// Add context timeout wrapper
-func (s *LiteStorage) withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		return context.WithTimeout(ctx, timeout)
-	}
-	return ctx, func() {}
-}
-
-func safeConvertTransaction(workchain int32, tx tongo.Transaction, cd *abi.ContractDescription) (*core.Transaction, error) {
-	var result *core.Transaction
-	var err error
-
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic in transaction conversion: %v", r)
-		}
-	}()
-
-	result, err = core.ConvertTransaction(workchain, tx, cd)
-	return result, err
-}
-
 func (s *LiteStorage) storeTransactionWithRetry(hash tongo.Bits256, tx *core.Transaction) error {
 	return retry.Do(
 		func() error {
@@ -1317,7 +1295,7 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 			}
 
 			s.blockQueue.Add(block)
-			
+
 			// Add retry logic
 			var processErr error
 			for attempts := 0; attempts < 3; attempts++ {
@@ -1333,11 +1311,11 @@ func (s *LiteStorage) ForwardProcessSeqno(ctx context.Context) error {
 				processErr = nil
 				break
 			}
-			
+
 			if processErr != nil {
 				return processErr
 			}
-			
+
 			s.logger.Info("processed seqno", zap.Uint32("seqno", seqno))
 		}
 	}
