@@ -431,58 +431,6 @@ func (s *LiteStorage) searchTransactionInBlock(ctx context.Context, a tongo.Acco
 	return nil, fmt.Errorf("not found")
 }
 
-func (s *LiteStorage) searchTransactionInBlockV2(ctx context.Context, a tongo.AccountID, lt uint64, blockID tongo.BlockID, back bool) (*core.Transaction, error) {
-	// // Convert shard block seqno to masterchain seqno if needed
-	// masterSeqno := blockID.Seqno
-	// if blockID.Workchain != -1 || blockID.Shard != 0x8000000000000000 {
-	// 	header, err := s.GetBlockHeader(ctx, blockID)
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("failed to get block header: %w", err)
-	// 	}
-	// 	masterSeqno = header.MasterRef.Seqno
-	// }
-
-	// blockIDExt := tongo.BlockIDExt{
-	// 	BlockID: tongo.BlockID{
-	// 		Workchain: -1,
-	// 		Shard:     0x8000000000000000,
-	// 		Seqno:     masterSeqno,
-	// 	},
-	// }
-
-	// // Try to get block from DB first
-	// block, err := s.getBlock(blockIDExt)
-
-	// // If not found in DB or DB lookup failed, try chain
-	// transactions, err := s.GetMasterchainTransactions(ctx, int32(masterSeqno))
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to get masterchain transactions: %w", err)
-	// }
-
-	// // Search for matching transaction
-	// if err == nil {
-	// 	// Search in block from DB
-	// 	for _, tx := range transactions {
-	// 		if tx.AccountAddr != a.Address {
-	// 			continue
-	// 		}
-	// 		inMsg := tx.Msgs.InMsg
-	// 		if !back && inMsg.Exists && inMsg.Value.Value.Info.IntMsgInfo != nil && inMsg.Value.Value.Info.IntMsgInfo.CreatedLt == lt {
-	// 			return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
-	// 		}
-	// 		if back {
-	// 			for _, m := range tx.Msgs.OutMsgs.Values() {
-	// 				if m.Value.Info.IntMsgInfo != nil && m.Value.Info.IntMsgInfo.CreatedLt == lt {
-	// 					return core.ConvertTransaction(a.Workchain, tongo.Transaction{BlockID: blockIDExt, Transaction: *tx}, nil)
-	// 				}
-	// 			}
-	// 		}
-	// 	}
-	// }
-
-	return nil, fmt.Errorf("not found")
-}
-
 func (s *LiteStorage) getAccountInterfaces(ctx context.Context, id tongo.AccountID) ([]abi.ContractInterface, error) {
 	interfaces, ok := s.accountInterfacesCache.Load(id)
 	if ok {

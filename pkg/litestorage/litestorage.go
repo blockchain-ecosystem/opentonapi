@@ -38,6 +38,11 @@ import (
 	"github.com/tonkeeper/opentonapi/pkg/core"
 )
 
+const (
+	txKeyPrefix    = "tx:"
+	blockKeyPrefix = "blk:"
+)
+
 var storageTimeHistogramVec = promauto.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Name:    "litestorage_functions_time",
@@ -66,18 +71,14 @@ type CacheOptions struct {
 }
 
 type storageMetrics struct {
-	blockProcessingTime       prometheus.Histogram
-	transactionProcessingTime prometheus.Histogram
-	cleanupDuration           prometheus.Histogram
+	cleanupDuration prometheus.Histogram
 }
 
 type LiteStorage struct {
-	logger          *zap.Logger
-	client          *liteapi.Client
-	executor        abi.Executor
-	jettonMetaCache *xsync.MapOf[string, tep64.Metadata]
-	// transactionsIndexByHash *xsync.MapOf[tongo.Bits256, *core.Transaction]
-	// transactionsByInMsgLT   *xsync.MapOf[inMsgCreatedLT, tongo.Bits256]
+	logger                 *zap.Logger
+	client                 *liteapi.Client
+	executor               abi.Executor
+	jettonMetaCache        *xsync.MapOf[string, tep64.Metadata]
 	blockCache             *xsync.MapOf[tongo.BlockIDExt, *tlb.Block]
 	accountInterfacesCache *xsync.MapOf[tongo.AccountID, []abi.ContractInterface]
 	// tvmLibraryCache contains public tvm libraries.
@@ -103,7 +104,6 @@ type LiteStorage struct {
 	maxConns            int
 	timeout             time.Duration
 	txMutex             sync.RWMutex
-	blockMutex          sync.RWMutex
 	blockRetryCount     int
 	blockRetryDelay     time.Duration
 	lastProcessedSeqno  uint32
@@ -111,12 +111,8 @@ type LiteStorage struct {
 	blockQueue          *BlockQueue
 	cleanupInterval     time.Duration
 	maxBatchSize        int
-	connPoolMetrics     struct {
-		active    prometheus.Gauge
-		available prometheus.Gauge
-	}
-	metrics      *storageMetrics
-	cleanupMutex sync.Mutex
+	metrics             *storageMetrics
+	cleanupMutex        sync.Mutex
 
 	traceCache *sync.Map
 }
@@ -331,14 +327,7 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 				zap.Error(err))
 		}
 	})
-	// iterator := iter.Iterator[tongo.AccountID]{MaxGoroutines: s.maxGoroutines}
-	// iterator.ForEach(o.preloadAccounts, func(accountID *tongo.AccountID) {
-	// 	if err := s.preloadAccount(*accountID); err != nil {
-	// 		log.Error("failed to preload account",
-	// 			zap.String("accountID", accountID.String()),
-	// 			zap.Error(err))
-	// 	}
-	// })
+
 	go s.run(context.Background(), o.blockCh)
 	go s.runBlockchainConfigUpdate(5 * time.Second)
 
@@ -349,25 +338,13 @@ func NewLiteStorage(logger *zap.Logger, cli *liteapi.Client, opts ...Option) (*L
 
 	// Start background tasks
 	go s.startBlockCleanup(ctx)
-	// go s.startTransactionCleanup(ctx)
-	// go s.startTransactionConversion(ctx)
-
 	return s, nil
-}
-
-func (s *LiteStorage) SetExecutor(e abi.Executor) {
-	s.executor = e
 }
 
 // Shutdown stops all background goroutines.
 func (s *LiteStorage) Shutdown() {
 	s.stopCh <- struct{}{}
 }
-
-const (
-	txKeyPrefix    = "tx:"
-	blockKeyPrefix = "blk:"
-)
 
 func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction) error {
 	s.txMutex.Lock()
@@ -624,35 +601,6 @@ func (s *LiteStorage) GetRawAccounts(ctx context.Context, ids []tongo.AccountID)
 	return accounts, nil
 }
 
-func (s *LiteStorage) preloadAccount(a tongo.AccountID) error {
-	ctx := context.Background()
-	accountTxs, err := s.client.GetLastTransactions(ctx, a, 2000)
-	if err != nil {
-		return err
-	}
-	for _, tx := range accountTxs {
-		inspector := abi.NewContractInspector(abi.InspectWithLibraryResolver(s))
-		account, err := s.GetRawAccount(ctx, a)
-		if err != nil {
-			return err
-		}
-		cd, err := inspector.InspectContract(ctx, account.Code, s.executor, a)
-		t, err := core.ConvertTransaction(a.Workchain, tx, cd)
-		if err != nil {
-			return err
-		}
-		hash := tongo.Bits256(tx.Hash())
-		// s.transactionsIndexByHash.Store(hash, t)
-		s.storeTransactionWithRetry(hash, t)
-		createLT, ok := extractInMsgCreatedLT(a, &tx.Transaction)
-		if ok {
-			// s.transactionsByInMsgLT.Store(createLT, hash)
-			s.StoreTransactionByInMsgLT(a.String(), createLT.lt, hash)
-		}
-	}
-	return nil
-}
-
 func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 	ctx := context.Background()
 	extID, _, err := s.client.LookupBlock(ctx, id, 1, nil, nil)
@@ -680,11 +628,9 @@ func (s *LiteStorage) preloadBlock(id tongo.BlockID) error {
 			return err
 		}
 		hash := tongo.Bits256(tx.Hash())
-		// s.transactionsIndexByHash.Store(hash, t)
 		s.storeTransactionWithRetry(hash, t)
 		createLT, ok := extractInMsgCreatedLT(accountID, tx)
 		if ok {
-			// s.transactionsByInMsgLT.Store(createLT, hash)
 			s.StoreTransactionByInMsgLT(accountID.String(), createLT.lt, hash)
 		}
 	}
@@ -791,26 +737,6 @@ func (s *LiteStorage) GetBlockTransactions(ctx context.Context, id tongo.BlockID
 	s.logger.Info("getting block transactions",
 		zap.String("block_id", blockID.String()))
 	block, err := s.client.GetBlock(ctx, blockID)
-	if err != nil {
-		return nil, err
-	}
-	return core.ExtractTransactions(s.logger, blockID, &block)
-}
-
-func (s *LiteStorage) GetShardTransactions(ctx context.Context, id tongo.BlockID) ([]*core.Transaction, error) {
-	timer := prometheus.NewTimer(prometheus.ObserverFunc(func(v float64) {
-		storageTimeHistogramVec.WithLabelValues("get_block_transactions").Observe(v)
-	}))
-	defer timer.ObserveDuration()
-	blockID, _, err := s.client.LookupBlock(ctx, id, 1, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	s.logger.Info("getting block transactions",
-		zap.String("block_id", blockID.String()))
-	block, err := s.client.GetBlock(ctx, blockID)
-
 	if err != nil {
 		return nil, err
 	}
@@ -1003,46 +929,12 @@ func (s *LiteStorage) updateLastProcessedSeqnoTx(txn *badger.Txn, seqno uint32) 
 	return txn.Set([]byte("last_processed_seqno"), buf)
 }
 
-func (s *LiteStorage) storeBlockTx(txn *badger.Txn, blockID tongo.BlockIDExt, block *tlb.Block) error {
-	data, err := json.Marshal(block)
-	if err != nil {
-		return fmt.Errorf("failed to marshal block: %w", err)
-	}
-
-	key := append([]byte("blk:"), []byte(blockID.String())...)
-	return txn.Set(key, data)
-}
-
 func (s *LiteStorage) retryOperation(ctx context.Context, fn func(txn *badger.Txn) error) error {
 	return retry.Do(
 		func() error { return s.db.Update(fn) },
 		retry.Attempts(3),
 		retry.Delay(100*time.Millisecond),
 		retry.Context(ctx))
-}
-
-func (s *LiteStorage) getBlockWithRetry(ctx context.Context, blockID tongo.BlockID) (tongo.BlockIDExt, *tlb.Block, error) {
-	var blockIDExt tongo.BlockIDExt
-	var block *tlb.Block
-
-	err := retry.Do(func() error {
-		var err error
-		blockIDExt, _, err = s.client.LookupBlock(ctx, blockID, 1, nil, nil)
-		if err != nil {
-			return err
-		}
-
-		block, err = s.getBlock(blockIDExt)
-		if err != nil {
-			block, err = s.fetchBlockFromChain(ctx, blockIDExt)
-		}
-		return err
-	},
-		retry.Attempts(uint(s.blockRetryCount)),
-		retry.Delay(s.blockRetryDelay),
-		retry.DelayType(retry.BackOffDelay))
-
-	return blockIDExt, block, err
 }
 
 func (s *LiteStorage) processQueuedSeqno(ctx context.Context) error {
