@@ -154,7 +154,8 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 
 	hash, err := h.storage.SearchTxHashInStorage(msgHash)
 	if err != nil {
-		return nil, toError(http.StatusInternalServerError, err)
+		// return nil, toError(http.StatusInternalServerError, err)
+		hash = msgHash
 	}
 
 	trace, emulated, err := h.getTraceByHash(ctx, hash)

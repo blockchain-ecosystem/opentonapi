@@ -495,7 +495,7 @@ func (s *LiteStorage) SearchTxHashInStorage(hash tongo.Bits256) (tongo.Bits256, 
 		})
 	})
 	if err != nil {
-		s.logger.Debug("Transaction hash not found by msg hash",
+		s.logger.Info("Transaction hash not found by msg hash",
 			zap.String("hash", hash.Hex()))
 		return tongo.Bits256{}, err
 	}
