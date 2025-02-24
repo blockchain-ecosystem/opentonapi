@@ -41,6 +41,7 @@ import (
 const (
 	txKeyPrefix    = "tx:"
 	blockKeyPrefix = "blk:"
+	hashKeyPrefix  = "hash:"
 )
 
 var storageTimeHistogramVec = promauto.NewHistogramVec(
@@ -476,6 +477,30 @@ func (s *LiteStorage) searchTxInStorage(a tongo.AccountID, lt uint64) *core.Tran
 	}
 
 	return tx
+}
+
+func (s *LiteStorage) SearchTxHashInStorage(hash tongo.Bits256) (tongo.Bits256, error) {
+	// Create key in same format as storage
+	hashKey := append([]byte(txKeyPrefix), hash[:]...)
+
+	var txHash tongo.Bits256
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(hashKey)
+		if err != nil {
+			return err
+		}
+		return item.Value(func(val []byte) error {
+			copy(txHash[:], val)
+			return nil
+		})
+	})
+	if err != nil {
+		s.logger.Debug("Transaction hash not found by msg hash",
+			zap.String("hash", hash.Hex()))
+		return tongo.Bits256{}, err
+	}
+
+	return txHash, nil
 }
 
 func (s *LiteStorage) GetTransactionByInMsgLT(accountID string, createLT uint64) (tongo.Bits256, error) {
@@ -1059,6 +1084,8 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 			if err != nil {
 				return fmt.Errorf("failed to marshal transaction: %w", err)
 			}
+
+			// Store transaction with hash
 			key := append([]byte(txKeyPrefix), tx.Hash[:]...)
 			if err := txn.SetEntry(badger.NewEntry(key, data).WithMeta(0x01)); err != nil {
 				return err
@@ -1068,6 +1095,14 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 			ltKey := []byte("lt_" + tx.Account.String() + "_" + fmt.Sprint(tx.Lt))
 			if err := txn.SetEntry(badger.NewEntry(ltKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
 				return err
+			}
+
+			// Store msg hash index
+			if tx.InMsg != nil && tx.InMsg.Hash != (tongo.Bits256{}) {
+				hashKey := append([]byte(txKeyPrefix), tx.InMsg.Hash[:]...)
+				if err := txn.SetEntry(badger.NewEntry(hashKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
+					return err
+				}
 			}
 
 			// s.logger.Info("stored transaction in batch",

@@ -131,6 +131,7 @@ type liteStorageRaw interface {
 	GetConfigAllRaw(ctx context.Context, mode uint32, id tongo.BlockIDExt) (liteclient.LiteServerConfigInfoC, error)
 	GetShardBlockProofRaw(ctx context.Context, id tongo.BlockIDExt) (liteclient.LiteServerShardBlockProofC, error)
 	GetOutMsgQueueSizes(ctx context.Context) (liteclient.LiteServerOutMsgQueueSizesC, error)
+	SearchTxHashInStorage(hash tongo.Bits256) (tongo.Bits256, error)
 }
 
 // chainState provides current blockchain state which change very rarely or slow like staking APY income

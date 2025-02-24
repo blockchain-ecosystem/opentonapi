@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -146,10 +147,16 @@ func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core
 }
 
 func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas.Trace, error) {
-	hash, err := tongo.ParseHash(params.TraceID)
+	msgHash, err := tongo.ParseHash(params.TraceID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
+
+	hash, err := h.storage.SearchTxHashInStorage(msgHash)
+	if err != nil {
+		return nil, toError(http.StatusInternalServerError, err)
+	}
+
 	trace, emulated, err := h.getTraceByHash(ctx, hash)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
