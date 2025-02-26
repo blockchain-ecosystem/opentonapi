@@ -2,3 +2,8 @@ cover.out
 *.output.json
 scripts/
 .env
+Dockerfile.prod
+data-ton/
+docker-compose.yml
+nginx.conf
+as
