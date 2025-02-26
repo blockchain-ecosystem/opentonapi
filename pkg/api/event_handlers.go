@@ -163,6 +163,7 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 	hash, err := h.storage.SearchTxHashInStorage(msgHash)
 	if err != nil {
 		fmt.Printf("SearchTxHashInStorage error %s\n", err)
+		fmt.Printf("msgHash %s\n", msgHash.Hex())
 		// return nil, toError(http.StatusInternalServerError, err)
 		hash = msgHash
 	} else {
