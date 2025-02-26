@@ -1132,11 +1132,14 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 				if err := txn.SetEntry(badger.NewEntry(msgKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
 					return fmt.Errorf("failed to store message hash index: %w", err)
 				}
-			}
 
-			s.logger.Debug("storing transaction hash",
-				zap.String("tx_hash", tx.Hash.Hex()),
-				zap.String("msg_hash", tx.InMsg.Hash.Hex()))
+				s.logger.Debug("storing transaction with message hash",
+					zap.String("tx_hash", tx.Hash.Hex()),
+					zap.String("msg_hash", tx.InMsg.Hash.Hex()))
+			} else {
+				s.logger.Debug("storing transaction without message hash",
+					zap.String("tx_hash", tx.Hash.Hex()))
+			}
 		}
 		return nil
 	})
