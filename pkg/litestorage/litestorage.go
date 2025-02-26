@@ -481,22 +481,30 @@ func (s *LiteStorage) searchTxInStorage(a tongo.AccountID, lt uint64) *core.Tran
 
 func (s *LiteStorage) SearchTxHashInStorage(hash tongo.Bits256) (tongo.Bits256, error) {
 	// Create key in same format as storage
-	hashKey := append([]byte(txKeyPrefix), hash[:]...)
+	hashKey := append([]byte(hashKeyPrefix), hash[:]...)
 
 	var txHash tongo.Bits256
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(hashKey)
 		if err != nil {
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				return core.ErrEntityNotFound
+			}
 			return err
 		}
 		return item.Value(func(val []byte) error {
+			if len(val) != 32 {
+				return fmt.Errorf("invalid hash length: %d", len(val))
+			}
 			copy(txHash[:], val)
 			return nil
 		})
 	})
+
 	if err != nil {
-		s.logger.Info("Transaction hash not found by msg hash",
-			zap.String("hash", hash.Hex()))
+		s.logger.Info("Transaction hash not found",
+			zap.String("search_hash", hash.Hex()),
+			zap.Error(err))
 		return tongo.Bits256{}, err
 	}
 
@@ -1109,16 +1117,15 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 
 			// Store msg hash index
 			if tx.InMsg != nil && tx.InMsg.Hash != (tongo.Bits256{}) {
-				hashKey := append([]byte(txKeyPrefix), tx.InMsg.Hash[:]...)
-				if err := txn.SetEntry(badger.NewEntry(hashKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
-					return err
+				msgKey := append([]byte(hashKeyPrefix), tx.InMsg.Hash[:]...)
+				if err := txn.SetEntry(badger.NewEntry(msgKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
+					return fmt.Errorf("failed to store message hash index: %w", err)
 				}
 			}
 
-			// s.logger.Info("stored transaction in batch",
-			// 	zap.String("hash", tx.Hash.Hex()),
-			// 	zap.String("account", tx.Account.String()),
-			// 	zap.Uint64("lt", tx.Lt))
+			s.logger.Debug("storing transaction hash",
+				zap.String("tx_hash", tx.Hash.Hex()),
+				zap.String("msg_hash", tx.InMsg.Hash.Hex()))
 		}
 		return nil
 	})
