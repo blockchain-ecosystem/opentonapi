@@ -752,11 +752,11 @@ func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash t
 		return nil, fmt.Errorf("failed to search transaction hash in storage: %w", err)
 	}
 
-	// trace, err := s.GetTrace(ctx, hash)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	return &hash, nil
+	trace, err := s.GetTrace(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	return &trace.Hash, nil
 }
 
 func (s *LiteStorage) GetBlockTransactions(ctx context.Context, id tongo.BlockID) ([]*core.Transaction, error) {
