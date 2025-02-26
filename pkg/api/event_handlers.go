@@ -154,6 +154,7 @@ func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core
 
 func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas.Trace, error) {
 	msgHash, err := tongo.ParseHash(params.TraceID)
+	fmt.Printf("GetTrace %s\n", msgHash.Hex())
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
@@ -164,6 +165,7 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 		// return nil, toError(http.StatusInternalServerError, err)
 		hash = msgHash
 	}
+	fmt.Printf("SearchTxHashInStorage %s\n", hash.Hex())
 	// else {
 	// 	fmt.Printf("SearchTxHashInStorage success %s\n", hash.Hex())
 	// }
