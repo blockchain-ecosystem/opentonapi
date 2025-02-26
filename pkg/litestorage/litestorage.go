@@ -369,6 +369,12 @@ func (s *LiteStorage) storeTransaction(hash tongo.Bits256, tx *core.Transaction)
 func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*core.Transaction, error) {
 	// s.logger.Info("getting transaction", zap.String("hash", hash.Hex()))
 
+	// SearchTxHashInStorage
+	txHash, err := s.SearchTxHashInStorage(hash)
+	if err != nil {
+		txHash = hash
+	}
+
 	// Try DB first with shorter lock scope
 	tx, err := func() (*core.Transaction, error) {
 		s.txMutex.RLock()
@@ -376,7 +382,7 @@ func (s *LiteStorage) GetTransaction(ctx context.Context, hash tongo.Bits256) (*
 
 		var tx core.Transaction
 		err := s.db.View(func(txn *badger.Txn) error {
-			key := append([]byte(txKeyPrefix), hash[:]...)
+			key := append([]byte(txKeyPrefix), txHash[:]...)
 			item, err := txn.Get(key)
 			if err != nil {
 				if err == badger.ErrKeyNotFound {
@@ -1097,6 +1103,11 @@ func (s *LiteStorage) processTransactions(txs []*core.Transaction) error {
 func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 	return s.retryOperation(context.Background(), func(txn *badger.Txn) error {
 		for _, tx := range batch {
+			if tx == nil {
+				s.logger.Warn("skipping nil transaction in batch")
+				continue
+			}
+
 			// Store full transaction
 			data, err := json.Marshal(tx)
 			if err != nil {
@@ -1115,7 +1126,7 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 				return err
 			}
 
-			// Store msg hash index
+			// Store msg hash index with nil checks
 			if tx.InMsg != nil && tx.InMsg.Hash != (tongo.Bits256{}) {
 				msgKey := append([]byte(hashKeyPrefix), tx.InMsg.Hash[:]...)
 				if err := txn.SetEntry(badger.NewEntry(msgKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
