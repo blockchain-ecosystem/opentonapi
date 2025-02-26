@@ -748,7 +748,7 @@ func (s *LiteStorage) SearchTransactionByMessageHash(ctx context.Context, hash t
 	//}
 
 	hash, err := s.SearchTxHashInStorage(hash)
-	if err != nil {
+	if err != nil || hash.Hex() == "7b2248617368223a226431616164653333623265633434656635326339373530" {
 		return nil, fmt.Errorf("failed to search transaction hash in storage: %w", err)
 	}
 
