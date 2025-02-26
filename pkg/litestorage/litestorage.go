@@ -481,7 +481,7 @@ func (s *LiteStorage) searchTxInStorage(a tongo.AccountID, lt uint64) *core.Tran
 
 func (s *LiteStorage) SearchTxHashInStorage(hash tongo.Bits256) (tongo.Bits256, error) {
 	// Create key in same format as storage
-	hashKey := append([]byte(txKeyPrefix), hash[:]...)
+	hashKey := append([]byte(hashKeyPrefix), hash[:]...)
 
 	var txHash tongo.Bits256
 	err := s.db.View(func(txn *badger.Txn) error {
@@ -1109,7 +1109,7 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 
 			// Store msg hash index
 			if tx.InMsg != nil && tx.InMsg.Hash != (tongo.Bits256{}) {
-				hashKey := append([]byte(txKeyPrefix), tx.InMsg.Hash[:]...)
+				hashKey := append([]byte(hashKeyPrefix), tx.InMsg.Hash[:]...)
 				if err := txn.SetEntry(badger.NewEntry(hashKey, tx.Hash[:]).WithMeta(0x01)); err != nil {
 					return err
 				}
