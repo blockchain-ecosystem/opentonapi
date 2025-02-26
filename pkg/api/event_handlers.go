@@ -127,6 +127,7 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 }
 
 func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core.Trace, bool, error) {
+	fmt.Printf("getTraceByHash %s\n", hash.Hex())
 	trace, err := h.storage.GetTrace(ctx, hash)
 	if err == nil || !errors.Is(err, core.ErrEntityNotFound) {
 		return trace, false, err
@@ -157,11 +158,16 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
+	// hash := msgHash
 
 	hash, err := h.storage.SearchTxHashInStorage(msgHash)
 	if err != nil {
+		fmt.Printf("SearchTxHashInStorage error %s\n", err)
+		fmt.Printf("msgHash %s\n", msgHash.Hex())
 		// return nil, toError(http.StatusInternalServerError, err)
 		hash = msgHash
+	} else {
+		fmt.Printf("SearchTxHashInStorage success %s\n", hash.Hex())
 	}
 
 	trace, emulated, err := h.getTraceByHash(ctx, hash)
