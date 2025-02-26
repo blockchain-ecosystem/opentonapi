@@ -158,13 +158,13 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	hash := msgHash
+	// hash := msgHash
 
-	// hash, err := h.storage.SearchTxHashInStorage(msgHash)
-	// if err != nil {
-	// 	// return nil, toError(http.StatusInternalServerError, err)
-	// 	hash = msgHash
-	// }
+	hash, err := h.storage.SearchTxHashInStorage(msgHash)
+	if err != nil {
+		// return nil, toError(http.StatusInternalServerError, err)
+		hash = msgHash
+	}
 
 	trace, emulated, err := h.getTraceByHash(ctx, hash)
 	if errors.Is(err, core.ErrEntityNotFound) {
