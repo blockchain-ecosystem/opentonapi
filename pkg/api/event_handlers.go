@@ -128,12 +128,14 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 
 func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core.Trace, bool, error) {
 	trace, err := h.storage.GetTrace(ctx, hash)
-	if err == nil || !errors.Is(err, core.ErrEntityNotFound) {
+	if err == nil {
 		fmt.Printf("GetTrace success by original hash %s\n", hash.Hex())
 		return trace, false, err
-	} else {
-		fmt.Printf("trace not found by original hash %s\n", hash.Hex())
 	}
+	if !errors.Is(err, core.ErrEntityNotFound) {
+		return trace, false, err
+	}
+	fmt.Printf("trace not found by original hash %s\n", hash.Hex())
 	txHash, err := h.storage.SearchTransactionByMessageHash(ctx, hash)
 	fmt.Printf("SearchTransactionByMessageHash %s\n", txHash.Hex())
 
