@@ -130,17 +130,23 @@ func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core
 	trace, err := h.storage.GetTrace(ctx, hash)
 	if err == nil || !errors.Is(err, core.ErrEntityNotFound) {
 		return trace, false, err
+	} else {
+		fmt.Printf("trace not found %s\n", hash.Hex())
 	}
 	txHash, err := h.storage.SearchTransactionByMessageHash(ctx, hash)
+
+	fmt.Printf("SearchTransactionByMessageHash %s\n", txHash.Hex())
 	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
 		return nil, false, err
 	}
 	if err == nil {
+		fmt.Printf("GetTrace %s\n", txHash.Hex())
 		trace, err = h.storage.GetTrace(ctx, *txHash)
 		return trace, false, err
 	}
 	trace, ok := h.mempoolEmulate.traces.Get(hash)
 	if ok {
+		fmt.Printf("GetTrace success %s\n", hash.Hex())
 		return trace, true, nil
 	}
 	return nil, false, core.ErrEntityNotFound
