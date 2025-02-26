@@ -129,18 +129,20 @@ func (h *Handler) SendBlockchainMessage(ctx context.Context, request *oas.SendBl
 func (h *Handler) getTraceByHash(ctx context.Context, hash tongo.Bits256) (*core.Trace, bool, error) {
 	trace, err := h.storage.GetTrace(ctx, hash)
 	if err == nil || !errors.Is(err, core.ErrEntityNotFound) {
+		fmt.Printf("GetTrace success by original hash %s\n", hash.Hex())
 		return trace, false, err
 	} else {
-		fmt.Printf("trace not found %s\n", hash.Hex())
+		fmt.Printf("trace not found by original hash %s\n", hash.Hex())
 	}
 	txHash, err := h.storage.SearchTransactionByMessageHash(ctx, hash)
-
 	fmt.Printf("SearchTransactionByMessageHash %s\n", txHash.Hex())
+
 	if err != nil && !errors.Is(err, core.ErrEntityNotFound) {
+		fmt.Printf("SearchTransactionByMessageHash error %s\n", err)
 		return nil, false, err
 	}
 	if err == nil {
-		fmt.Printf("GetTrace %s\n", txHash.Hex())
+		fmt.Printf("GetTrace by txHash %s\n", txHash.Hex())
 		trace, err = h.storage.GetTrace(ctx, *txHash)
 		return trace, false, err
 	}
@@ -157,12 +159,15 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-
-	hash, err := h.storage.SearchTxHashInStorage(msgHash)
-	if err != nil {
-		// return nil, toError(http.StatusInternalServerError, err)
-		hash = msgHash
-	}
+	hash := msgHash
+	// hash, err := h.storage.SearchTxHashInStorage(msgHash)
+	// if err != nil {
+	// 	fmt.Printf("Not found hash inSearchTxHashInStorage %s\n", msgHash.Hex())
+	// 	// return nil, toError(http.StatusInternalServerError, err)
+	// 	hash = msgHash
+	// } else {
+	// 	fmt.Printf("Found hash inSearchTxHashInStorage %s for original hash %s\n", hash.Hex(), msgHash.Hex())
+	// }
 
 	trace, emulated, err := h.getTraceByHash(ctx, hash)
 	if errors.Is(err, core.ErrEntityNotFound) {
