@@ -58,7 +58,7 @@ func (s *LiteStorage) GetTrace(ctx context.Context, hash tongo.Bits256) (*core.T
 	tx, err := s.GetTransaction(ctx, hash)
 	if err != nil {
 		if errors.Is(err, core.ErrEntityNotFound) {
-			s.logger.Debug("transaction not found",
+			s.logger.Info("transaction not found",
 				zap.String("trace_id", traceID))
 			return nil, core.ErrEntityNotFound // This will be converted to 404
 		}
