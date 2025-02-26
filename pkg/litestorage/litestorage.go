@@ -1117,7 +1117,12 @@ func (s *LiteStorage) storeTransactionBatch(batch []*core.Transaction) error {
 
 			s.logger.Info("stored transaction in batch",
 				zap.String("hash", tx.Hash.Hex()),
-				zap.String("msg_hash", tx.InMsg.Hash.Hex()))
+				zap.String("msg_hash", func() string {
+					if tx.InMsg == nil {
+						return ""
+					}
+					return tx.InMsg.Hash.Hex()
+				}()))
 
 		}
 		return nil
