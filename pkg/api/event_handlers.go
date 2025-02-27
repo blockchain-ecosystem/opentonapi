@@ -188,11 +188,20 @@ func (h *Handler) GetTrace(ctx context.Context, params oas.GetTraceParams) (*oas
 }
 
 func (h *Handler) GetEvent(ctx context.Context, params oas.GetEventParams) (*oas.Event, error) {
-	traceID, err := tongo.ParseHash(params.EventID)
+	traceIDOrigin, err := tongo.ParseHash(params.EventID)
 	if err != nil {
 		return nil, toError(http.StatusBadRequest, err)
 	}
-	trace, emulated, err := h.getTraceByHash(ctx, traceID)
+
+	traceID, err := h.storage.SearchTransactionByMessageHash(ctx, traceIDOrigin)
+
+	if err != nil || traceID.Hex() == "7b2248617368223a226431616164653333623265633434656635326339373530" {
+		fmt.Printf("SearchTxHashInStorage error %s\n", err)
+		// return nil, toError(http.StatusInternalServerError, err)
+		traceID = &traceIDOrigin
+	}
+
+	trace, emulated, err := h.getTraceByHash(ctx, *traceID)
 	if errors.Is(err, core.ErrEntityNotFound) {
 		return nil, toError(http.StatusNotFound, err)
 	}
